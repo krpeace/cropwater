@@ -179,8 +179,9 @@ python cropwater_multi.py --stns 101,119,131,146,156,136,216 --start 20260401 --
 ```
 cropwater/
 ├── README.md
+├── LICENSE
 ├── requirements.txt
-├── apikey.txt.example          ← 인증키 템플릿
+├── apikey.txt.example          ← 인증키 템플릿 (.gitignore에 apikey.txt 등록 필수)
 ├── .gitignore
 │
 ├── fao56_core.py               ← 공통 모듈 (FAO-56 물리식·API 조회·작물 라이브러리)
@@ -189,6 +190,12 @@ cropwater/
 │
 ├── crops_library.csv           ← 51개 작물 Kc·Zr·p (FAO-56 Table 12·22)
 ├── stations_backup.csv         ← ASOS 지점 메타 캐시
+│
+├── output/                     ← 분석 결과물 저장 폴더 (.gitignore로 xlsx 제외)
+│   └── .gitkeep
+│
+├── tests/
+│   └── test_fao56.py           ← FAO-56 핵심 계산 단위 테스트 (pytest)
 │
 └── docs/
     ├── THEORY.md               ← 관수·토양학 이론 (농대생 입문용)
