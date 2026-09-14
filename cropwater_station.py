@@ -624,7 +624,7 @@ def main():
     p=dict(lat=lat,elev=elev,anem=anem,fetch=a.fetch,stn=stn,start=start,end=end,meta_source=meta_source,crop=crop,
            bud_date=bud_date,bud_date_manual=bud_date_manual,is_short_cycle=is_short_cycle,L_total=L_total_v,
            u2_mid=u2_mid_v,rh_mid=rh_mid_v,u2_end=u2_end_v,rh_end=rh_end_v)
-    out=a.out if a.out!="eto_상세.xlsx" else f"eto({stn})_{crop_id}_{start}_{end}.xlsx"
+    out=a.out if a.out!="eto_상세.xlsx" else f"output/eto({stn})_{crop_id}_{start}_{end}.xlsx"
     n,saved_path=build_workbook(rows,p,out)
     print(f"[완료] {saved_path}  ({n}일)  → 시트: 설정 / 원데이터 / 계산과정(수식) / 결과요약 / 물수지 / 계산근거")
     print("  엑셀에서 열면 자동 계산됩니다. '설정' 시트의 노란칸(위도·고도 등)을 바꾸면 재계산돼요.")

@@ -368,7 +368,11 @@ def load_apikeys(fname="apikey.txt"):
 def safe_save(wb, path):
     """엑셀 파일이 이미 열려 있어(Windows 권한 오류) 저장이 막히면,
        파일명 뒤에 시각을 붙여 자동으로 다른 이름으로 저장한다.
+       output/ 같은 하위 폴더가 없으면 자동 생성한다.
        반환값: 실제로 저장된 경로."""
+    folder = os.path.dirname(path)
+    if folder and not os.path.exists(folder):
+        os.makedirs(folder, exist_ok=True)
     try:
         wb.save(path)
         return path

@@ -410,7 +410,7 @@ def main():
         out_path = a.out
     else:
         stn_str  = ", ".join(str(s) for s in stns)
-        out_path = f"eto({stn_str})_{start}_{end}.xlsx"
+        out_path = f"output/eto({stn_str})_{start}_{end}.xlsx"
 
     print(f"\n[분석] {len(stns)}개 지점, {start}~{end}")
     print(f"[물수지] TAW={TAW}mm, RAW={RAW}mm (Zr={a.zr}m, FC={a.fc}, WP={a.wp}, p={a.pdep}) | 기준작물(Kc=1) · 무관수 가정")
