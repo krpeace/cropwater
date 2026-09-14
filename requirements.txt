@@ -1,0 +1,5 @@
+# CropWater 의존 패키지
+# pip install -r requirements.txt
+
+requests>=2.28.0       # 기상청 OpenAPI HTTP 요청
+openpyxl>=3.1.0        # Excel (.xlsx) 파일 생성 및 편집

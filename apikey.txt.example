@@ -1,0 +1,18 @@
+# CropWater 인증키 파일
+# -----------------------------------------------
+# 이 파일을 복사하여 apikey.txt로 저장한 후 실제 키를 입력하세요.
+# cp apikey.txt.example apikey.txt
+#
+# ⚠️ apikey.txt는 절대 GitHub에 올리지 마세요.
+#    .gitignore에 apikey.txt가 포함되어 있는지 확인하세요.
+# -----------------------------------------------
+
+# 공공데이터포털 (data.go.kr)
+# 용도: 기상청 ASOS 일자료 조회 (getWthrDataList)
+# 발급: https://data.go.kr → 기상청 → ASOS 일자료 → 활용신청
+DATA_GO_KR=여기에_공공데이터포털_서비스키_입력
+
+# 기상청 API허브 (apihub.kma.go.kr)
+# 용도: ASOS 지점일람표 조회 (위도·고도·풍속계높이 자동 수집)
+# 발급: https://apihub.kma.go.kr → 회원가입 → API 키 발급
+KMA_HUB=여기에_기상청API허브_인증키_입력
