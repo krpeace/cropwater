@@ -1,0 +1,42 @@
+crop_id,crop_name_ko,crop_name_en,t_base,t_upper,gdd_milestones,source
+apple,사과,Apple,4,36,"500,1000,1500,2000,2500,3000,3500,4000",Paredes2025
+pear,배,Pear,4,36,"500,1000,1500,2000,2500,3000,3500,4000",Paredes2025
+grape,포도,Grape,10,35,"500,1000,1500,2000,2500,3000",Paredes2025
+cherry,체리,Cherry,4,25,"300,600,900,1200,1500",Paredes2025
+peach,복숭아,Peach,7,35,"500,1000,1500,2000,2500,3000",Paredes2025
+plum,자두,Plum,6,25,"300,600,900,1200,1500,2000",Paredes2025
+citrus,감귤,Citrus,13,35,"500,1000,1500,2000,2500,3000",Paredes2025
+persimmon,감,Persimmon,10,35,"500,1000,1500,2000,2500,3000",RDA_Korea
+kiwi,키위,Kiwi,5,,"500,1000,1500,2000,2500",Paredes2025
+blueberry,블루베리,Blueberry,7,,"300,600,900,1200,1500",Paredes2025
+strawberry,딸기,Strawberry,3,30,"300,600,900,1200",Paredes2025
+kimchi_cabbage,배추,Kimchi Cabbage,4,30,"300,600,900,1200",Paredes2025
+cabbage,양배추,Cabbage,4,24,"300,600,900,1200",Paredes2025
+radish,무,Radish,4,35,"200,400,600,800",Paredes2025
+lettuce,상추,Lettuce,4,28,"200,400,600,800",Paredes2025
+spinach,시금치,Spinach,4,25,"200,400,600",Paredes2025
+onion,양파,Onion,2,35,"300,600,900,1200,1500",Paredes2025
+garlic,마늘,Garlic,2,28,"300,600,900,1200,1500",Paredes2025
+potato,감자,Potato,2,30,"300,600,900,1200,1500",Paredes2025
+sweet_potato,고구마,Sweet Potato,8,30,"500,1000,1500,2000,2500",Paredes2025
+carrot,당근,Carrot,4,28,"200,400,600,800,1000",Paredes2025
+tomato,토마토,Tomato,8,30,"300,600,900,1200,1500",Paredes2025
+pepper,고추,Pepper,10,35,"300,600,900,1200,1500,2000",Paredes2025
+cucumber,오이,Cucumber,10,35,"300,600,900,1200",Paredes2025
+watermelon,수박,Watermelon,10,37,"500,1000,1500,2000",Paredes2025
+melon,참외,Melon,10,38,"300,600,900,1200",Paredes2025
+eggplant,가지,Eggplant,10,35,"300,600,900,1200,1500",Paredes2025
+pumpkin,호박,Pumpkin,10,38,"300,600,900,1200,1500",Paredes2025
+broccoli,브로콜리,Broccoli,5,30,"300,600,900,1200",Paredes2025
+rice,벼,Rice,10,40,"500,1000,1500,2000,2500,3000",Paredes2025
+barley,보리,Barley,0,30,"300,600,900,1200,1500",Paredes2025
+wheat,밀,Wheat,0,30,"300,600,900,1200,1500",Paredes2025
+maize,옥수수,Maize,10,30,"500,1000,1500,2000,2500",Paredes2025
+soybean,콩,Soybean,10,30,"300,600,900,1200,1500,2000",Paredes2025
+sorghum,수수,Sorghum,8,30,"500,1000,1500,2000,2500",Paredes2025
+alfalfa,알팔파,Alfalfa,5,35,"300,600,900,1200,1500",Paredes2025
+cotton,목화,Cotton,12,35,"500,1000,1500,2000,2500,3000",Paredes2025
+sunflower,해바라기,Sunflower,8,30,"300,600,900,1200,1500",Paredes2025
+sesame,참깨,Sesame,10,40,"300,600,900,1200",Paredes2025
+turfgrass_cool,한지형잔디,Cool-season Turfgrass,0,30,"500,1000,1500,2000,2500",General
+turfgrass_warm,난지형잔디,Warm-season Turfgrass,10,35,"500,1000,1500,2000,2500",General

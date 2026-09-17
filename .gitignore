@@ -1,0 +1,76 @@
+# ─────────────────────────────────────────
+# 프로젝트 고유
+# ─────────────────────────────────────────
+# API 인증키 — 절대 커밋 금지
+apikey.txt
+
+# ASOS 수집 캐시 (용량 크고 재생성 가능)
+data/raw/
+
+# 분석 출력물 (재생성 가능)
+output/
+
+
+# IDE
+.vscode/
+.idea/
+*.sublime-workspace
+
+# ─────────────────────────────────────────
+# Google Drive 동기화 관련
+# ─────────────────────────────────────────
+# Zone.Identifier — 인터넷/네트워크 드라이브에서 복사된 파일에 붙는
+# "다운로드됨" 표시 (NTFS 대체 데이터 스트림, ADS)
+# 실제로 git에 잡히진 않지만 명시적으로 제외
+*.ps1:Zone.Identifier
+*.py:Zone.Identifier
+*:Zone.Identifier
+
+# Google Drive 메타데이터 / 임시 파일
+.tmp.driveupload/
+.tmp.drivedownload/
+*.gdoc
+*.gsheet
+*.gslides
+Icon\r
+
+# ─────────────────────────────────────────
+# Windows 자동 생성 파일
+# ─────────────────────────────────────────
+desktop.ini
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+$RECYCLE.BIN/
+*.lnk
+
+# ─────────────────────────────────────────
+# macOS 자동 생성 파일 (혼용 환경 대비)
+# ─────────────────────────────────────────
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+
+# ─────────────────────────────────────────
+# Python
+# ─────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+*.pyc
+.pytest_cache/
+
+# 가상환경
+.venv/
+venv/
+env/
+ENV/

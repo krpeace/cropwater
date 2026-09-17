@@ -1,0 +1,7 @@
+# 공공데이터포털 인증키 (인코딩된 서비스키)
+# https://www.data.go.kr 에서 발급
+DATA_GO_KR=여기에_인코딩된_서비스키_입력
+
+# 기상청 API허브 인증키 (선택)
+# https://apihub.kma.go.kr 에서 발급
+KMA_HUB=여기에_API허브_인증키_입력
