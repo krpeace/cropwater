@@ -200,7 +200,8 @@ cropwater/
 └── docs/
     ├── THEORY.md               ← 관수·토양학 이론 (농대생 입문용)
     ├── ARCHITECTURE.md         ← 코드 구조·함수 레퍼런스 (개발자용)
-    └── RESULTS_GUIDE.md        ← 엑셀 결과 해석 방법
+    ├── RESULTS_GUIDE.md        ← 엑셀 결과 해석 방법
+    └── VALIDATION.md           ← 사이클별 가설·게이트 점검 기록
 ```
 
 ---
@@ -209,9 +210,10 @@ cropwater/
 
 | 문서 | 대상 | 내용 |
 | :--- | :--- | :--- |
-| [THEORY.md](docs/THEORY.md) | 농대생·입문자 | ETo·ETc·TAW·RAW·물수지 이론 |
+| [THEORY.md](docs/THEORY.md) | 농대생·입문자 | ETo·ETc·TAW·RAW·물수지 이론, 예보 기반 ETo(9장) |
 | [ARCHITECTURE.md](docs/ARCHITECTURE.md) | 개발자·연구자 | 함수 레퍼런스·데이터 흐름·확장 방법 |
 | [RESULTS_GUIDE.md](docs/RESULTS_GUIDE.md) | 현장 사용자 | 엑셀 시트별 해석·주의사항 |
+| [VALIDATION.md](docs/VALIDATION.md) | 연구자·개발자 | 고도화 사이클별 가설·합격기준·게이트 점검 기록 |
 
 ---
 
