@@ -21,7 +21,7 @@ from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter as CL
 
 from fao56_core import safe_save
-from fcst_archive import SERVICE_RUNS
+from fcst_archive import PCP_30_50_MM, PCP_GE50_MM, PCP_LT1_MM, SERVICE_RUNS
 
 
 def run_gaps(runs):
@@ -617,11 +617,11 @@ def sheet_attr(wb, res):
         for j, m in enumerate(methods, 3):
             H(ws, r, j, m, size=9)
         r += 1
-        pv = bc.pivot_table(index=["run_name", "lead_day"], columns="method", values=metric, sort=False)
+        pv = bc.pivot_table(index=["run_name", "lead_day"], columns="method", values=metric, sort=False, dropna=False)
         for (rn, k), vals in pv.iterrows():
             C(ws, r, 1, rn); C(ws, r, 2, int(k))
             for j, m in enumerate(methods, 3):
-                C(ws, r, j, float(vals[m]), fmt)
+                C(ws, r, j, _num(vals.get(m)), fmt)          # 값을 못 구한 보정(교차검증 학습 자료 부족)은 빈칸
             r += 1
     H(ws, r, 1, "3일 누적 RMSE (mm/3일)", fill=LIGHT, white=False); ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=2)
     for j, m in enumerate(methods, 3):
@@ -630,7 +630,7 @@ def sheet_attr(wb, res):
     for rn in dict.fromkeys(bc.run_name):
         C(ws, r, 1, rn); C(ws, r, 2, "첫 3일")
         for j, m in enumerate(methods, 3):
-            C(ws, r, j, float(bc[(bc.method == m) & (bc.run_name == rn)].RMSE_3d.iloc[0]), F2)
+            C(ws, r, j, _num(bc[(bc.method == m) & (bc.run_name == rn)].RMSE_3d.iloc[0]), F2)
         r += 1
     r += 1
     T(ws, r, 1, "③ 전체 기간 입력 편향 (예보 − 관측) — 보정값의 크기", 11, True, GREEN); r += 1
@@ -879,6 +879,19 @@ def sheet_chartdata(wb, df, db_rows, obs_rows):
 
 
 # ── 요약 ────────────────────────────────────────────────────────────────
+def _num(v):
+    """숫자 → float, 결측(NaN·None)은 None(빈칸)"""
+    return None if v is None or pd.isna(v) else float(v)
+
+
+SOURCE_NAMES = {"portal": "기상자료개방포털 과거 단기예보", "openapi": "기상청 단기예보 조회서비스(OpenAPI) 응답"}
+
+
+def source_text(chk):
+    """예보 자료 출처 이름 (check_archive의 formats — 없으면 포털)"""
+    return " + ".join(SOURCE_NAMES[f] for f in (chk.get("formats") or ["portal"]) if f in SOURCE_NAMES)
+
+
 def sheet_summary(wb, res, db_rows, c3_rows, groups, chart_rows):
     ws = wb["요약"]
     chk, df = res["check"], res["table"]
@@ -900,7 +913,7 @@ def sheet_summary(wb, res, db_rows, c3_rows, groups, chart_rows):
               f" — SKY계수 시트. 비교: S3(계수 {res['coef'].get('source', '')}, Rs계수 시트)" if main == "S4" else
               f"식(50) + 강수유무 보정(S3), 계수 {res['coef'].get('source', '')} — Rs계수 시트")
     info = [
-        ("예보 자료", f"기상자료개방포털 과거 단기예보(격자 {', '.join(chk['location'])}) · TMX·TMN·TMP·REH·WSD·PCP · "
+        ("예보 자료", f"{source_text(chk)}(격자 {', '.join(chk['location'])}) · TMX·TMN·TMP·REH·WSD·PCP · "
                     f"{iss[0]:%Y-%m-%d %H}시 ~ {iss[-1]:%Y-%m-%d %H}시 발표 중 6요소가 모두 있는 발표 {chk['issues']}회"
                     f" (한 요소라도 빠진 발표 {len(chk['missing_issues'])}회){opt_txt}"),
         ("서비스 발표", f"아침 02시 {n_m}회 → 오늘~D+3 · 저녁 17시 {n_e}회 → 내일~D+4 (다른 발표는 이전 시각 채움에만 사용)"),
@@ -1103,6 +1116,7 @@ def _metric_table(ws, r, hdr, groups, db, fcol, ocol, ecol, pcol, mcol):
 # ── 방법 ────────────────────────────────────────────────────────────────
 def sheet_method(wb, res):
     df, loc, sg = res["table"], res["check"]["location"], res.get("stn_grid")
+    fmts = res["check"].get("formats") or ["portal"]
     bt = res.get("boot")
     if sg and loc == [sg]:
         grid_note = f"예보 격자 {sg} = ASOS {res['stn']} 관측소 격자. 5 km 격자 대표값과 지점 관측의 차이(대표성 오차)는 남음."
@@ -1112,8 +1126,13 @@ def sheet_method(wb, res):
     ws = wb.create_sheet("방법")
     T(ws, 1, 1, "방법과 정의 (근거: docs/THEORY.md 9장, 설계: docs/ARCHITECTURE.md 7장)", 12, True, GREEN)
     items = [
-        ("자료", "예보", "기상자료개방포털 '단기예보(격자)' 과거자료 CSV. 필수 요소 TMX·TMN·TMP·REH·WSD·PCP, 선택 요소 SKY(하늘상태)·POP(강수확률). "
-                        "발표일시 = CSV의 UTC 일·시 + 9시간. 여러 달을 한 파일로 받으면 'Start : YYYYMMDD' 행마다 연월을 바꿔 읽음."),
+        ("자료", "예보", " ".join(t for f, t in (
+            ("portal", "기상자료개방포털 '단기예보(격자)' 과거자료 CSV(요소별 파일): 발표일시 = CSV의 UTC 일·시 + 9시간, "
+                       "여러 달을 한 파일로 받으면 'Start : YYYYMMDD' 행마다 연월을 바꿔 읽음."),
+            ("openapi", "단기예보 조회서비스(OpenAPI) 응답 CSV(한 파일에 모든 요소): 발표·예보 일시는 KST 그대로, "
+                        f"강수 문자열 '강수없음' 0 · '1mm 미만' {PCP_LT1_MM:g} · '30.0~50.0mm' {PCP_30_50_MM:g} · "
+                        f"'50.0mm 이상' {PCP_GE50_MM:g} mm/h.")) if f in fmts)
+                        + " 필수 요소 TMX·TMN·TMP·REH·WSD·PCP, 선택 요소 SKY(하늘상태)·POP(강수확률)."),
         ("", "관측", "ASOS 일자료(01-Cycle cropwater_station.py 출력 워크북 원데이터 시트). 관측 ETo는 01-Cycle 계산과정 시트와 같은 식."),
         ("서비스", "발표", "아침 02시 발표 → 오늘(D+0)~D+3, 저녁 17시 발표 → 내일(D+1)~D+4. 검증에는 이 두 발표만 사용(다른 발표를 섞으면 성능이 부풀려짐)."),
         ("일 입력", "Tmax·Tmin", "해당 발표의 TMX(낮최고 09:01~18:00)·TMN(아침최저 03:01~09:00). ASOS 일최고·최저(0~24시)와 정의가 다름."),
@@ -1123,7 +1142,12 @@ def sheet_method(wb, res):
         ("", "하늘상태", "SKY 코드 1 맑음·3 구름많음·4 흐림(그 밖의 값은 결측). 시각마다 태양고도의 사인값(밤 0)으로 가중해 낮 시간의 "
                       "구름많음 비율·흐림 비율(0~1)을 만듦 = 일사가 많은 한낮의 하늘상태가 더 크게 반영됨. 서비스 발표 자체에 SKY가 없으면 비워 둠. "
                       "강수확률(POP)은 같은 가중의 낮 평균(참고 값, Rs 추정에는 쓰지 않음)."),
-        ("", "지나간 시각 채움", "포털 과거자료는 발표 6시간 뒤부터 들어 있음(02시 발표 → 08시부터). 발표 시점에 이미 지난 시각은 그 이전의 가장 최근 발표 값으로 채움 → 아침 D+0의 00~07시 = 전날 17·20·23시 발표. (API는 발표 1시간 뒤부터 제공되므로 운영에서는 00~02시만 채움)"),
+        ("", "지나간 시각 채움", "발표 시점에 이미 지난 시각은 그 이전의 가장 최근 발표 값으로 채움. "
+                                 + ("포털 과거자료는 발표 6시간 뒤부터 들어 있음(02시 발표 → 08시부터) → 아침 D+0의 00~07시 = 전날 17·20·23시 발표. "
+                                    if "portal" in fmts else "")
+                                 + ("OpenAPI 자료는 발표 1시간 뒤부터 들어 있음(02시 발표 → 03시부터) → 아침 D+0의 00~02시 = 전날 23시 발표"
+                                    + (" (운영과 같음)." if fmts == ["openapi"] else ".") if "openapi" in fmts else
+                                    "(API는 발표 1시간 뒤부터 제공되므로 운영에서는 00~02시만 채움)")),
         ("", "결측", "값이 ±900 이상(예: −999.9)이면 결측. 필수 6요소 중 하나라도 없는 서비스 발표는 통째로 제외(다른 발표로 대신하지 않음). "
                     "주 방법이 S4면 하늘상태가 없는 행, 그리고 대상일 관측이 없는 행도 제외. 3일 누적은 첫 3개 대상일이 모두 있을 때만."),
         ("", "마지막 날", "아침 D+3·저녁 D+4는 00시(1시간) + 03~21시(3시간 간격) 8개 시각. 풍속·강수는 코드값 → WSD 1: 같은 발표 직전 정량일 평균(최대 3.9), 2: 6.5, 3: 11 m/s / PCP 1: 1.5, 2: 9, 3: 20 mm/h × 3시간."),

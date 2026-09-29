@@ -4,7 +4,7 @@
 cropwater_fcst.py — 기상청 단기예보 기반 ETo·ETc 예측과 검증 (02-Cycle 3단계, H2)
 
 [하는 일]
-  1) 과거 단기예보(포털 CSV)를 서비스 발표(아침 02시 → 오늘~D+3, 저녁 17시 → 내일~D+4)별 일 입력으로 집계
+  1) 과거 단기예보(포털 CSV 또는 OpenAPI 응답 CSV)를 서비스 발표(아침 02시 → 오늘~D+3, 저녁 17시 → 내일~D+4)별 일 입력으로 집계
      (fcst_archive.py)
   2) 예보 ETo = FAO-56 PM [식6]. 예보에 없는 Rs는 추정한다(rs_model.py)
      - S4(주 방법, 하늘상태 예보가 있을 때): 식(50)형 + 강수유무 + 낮 시간 구름많음·흐림 비율, 선행일별 계수
@@ -23,8 +23,10 @@ cropwater_fcst.py — 기상청 단기예보 기반 ETo·ETc 예측과 검증 (0
   python cropwater_fcst.py calib-sky --fcst data/fcst_101 --obs output/eto101_apple_20260101_20260928.xlsx --stn 101
 
 [입력]
-  --fcst : 기상자료개방포털 '단기예보(격자)' CSV 폴더(또는 파일들). 필수 요소 TMX·TMN·TMP·REH·WSD·PCP,
-           선택 요소 SKY(하늘상태)·POP(강수확률)
+  --fcst : 과거 단기예보 CSV 폴더(또는 파일들). 필수 요소 TMX·TMN·TMP·REH·WSD·PCP, 선택 요소 SKY(하늘상태)·POP(강수확률)
+           - 기상자료개방포털 '단기예보(격자)' CSV: 요소별 파일
+           - 단기예보 조회서비스(OpenAPI) 응답 CSV(baseDate,baseTime,category,fcstDate,fcstTime,fcstValue,nx,ny): 한 파일에 모든 요소
+           형식은 첫 줄로 자동 판별. 한 폴더에 섞어 넣어도 됨(같은 발표·시각은 나중에 읽은 파일 값)
   --obs  : 01-Cycle cropwater_station.py 출력 워크북(원데이터·설정 시트). 검증 기간 + 7일 전부터 포함
   rs_coef.csv : 지점별 Rs 계수(없으면 FAO-56 kRs 0.16)
 
@@ -460,7 +462,10 @@ def bias_correction_cv(df, lat, elev, coef):
         m = lead_metrics(d, c)
         m.insert(0, "method", name)
         _, c3 = cum3(d, c)
-        m = m.merge(c3[["run_name", "RMSE"]].rename(columns={"RMSE": "RMSE_3d"}), on="run_name", how="left")
+        if len(c3):
+            m = m.merge(c3[["run_name", "RMSE"]].rename(columns={"RMSE": "RMSE_3d"}), on="run_name", how="left")
+        else:              # 보정값을 못 구한 경우(예: S4인데 대상월이 2개뿐이라 중첩 교차검증의 학습 자료가 없음)
+            m["RMSE_3d"] = np.nan
         out.append(m)
     bias = (df.assign(dTmax=df.Tmax - df.Tmax_obs, dTmin=df.Tmin - df.Tmin_obs, du10=df.u10 - df.u10_obs)
               .groupby(["run_name", "lead_day"], sort=False)[["dTmax", "dTmin", "du10"]].mean().reset_index())
@@ -541,7 +546,7 @@ def run_verify(fcst_paths, obs_path, stn, coef_path="rs_coef.csv", analysis=True
         res["boot"] = bootstrap_h2(df)
         # 탐색: 교차검증한 보정을 적용했을 때 판정 여유가 얼마나 늘어나는지 (G4 보정 채택 판단 근거)
         res["boot_bc"] = {name: bootstrap_h2(df.assign(**{c: bc_rows[c]}), fcol=c)
-                          for c, name in (("B2", "기온+풍속 보정"), ("B3", "ETo 비율 보정"))}
+                          for c, name in (("B2", "기온+풍속 보정"), ("B3", "ETo 비율 보정")) if bc_rows[c].notna().any()}
         if res["main"] == "S4":   # 비교: 같은 대상일에서 하늘상태 없이(S3) 계산했을 때의 판정 불확실성
             res["boot_s3"] = bootstrap_h2(df, fcol="ETo_S3")
         res["findings"] = findings(res)
@@ -644,11 +649,16 @@ def findings(res):
     bc = res["bc"]
     r1 = lambda m: bc[(bc.method == m) & (bc.lead_day == 1)].RMSE.mean()
     raw = r1("보정 없음(원자료)")
-    vals = {m: r1(m) for m in dict.fromkeys(bc.method) if m != "보정 없음(원자료)"}
-    best = min(vals, key=vals.get)
-    out.append(f"보정 탐색(월 단위 교차검증, D+1 두 발표 평균 RMSE {raw:.2f}): "
-               + ", ".join(f"{m} {v:.2f}" for m, v in vals.items())
-               + f" mm/일 — 가장 좋은 방법은 '{best}'({1 - vals[best] / raw:.0%} 감소). 채택 여부는 G4에서 결정 (오차분해 ②)")
+    allv = {m: r1(m) for m in dict.fromkeys(bc.method) if m != "보정 없음(원자료)"}
+    vals = {m: v for m, v in allv.items() if pd.notna(v)}
+    na = [m for m in allv if m not in vals]       # 교차검증 학습 자료가 부족해 값을 못 구한 보정
+    if vals:
+        best = min(vals, key=vals.get)
+        out.append(f"보정 탐색(월 단위 교차검증, D+1 두 발표 평균 RMSE {raw:.2f}): "
+                   + ", ".join(f"{m} {v:.2f}" for m, v in vals.items())
+                   + f" mm/일 — 가장 좋은 방법은 '{best}'({1 - vals[best] / raw:.0%} 감소)"
+                   + (f". 대상월이 적어 계산하지 못한 보정: {', '.join(na)}" if na else "")
+                   + ". 채택 여부는 G4에서 결정 (오차분해 ②)")
     loc = res["check"]["location"]
     if res.get("grid_cmp"):
         gc, loc2 = res["grid_cmp"], res["compare"]["check"]["location"]
@@ -719,8 +729,9 @@ def main(argv=None):
     res = run_verify(a.fcst, a.obs, a.stn, a.coef, compare_paths=a.compare)
     df = res["table"]
     met = lead_metrics(df)
-    print(f"[예보] 격자 {res['check']['location']}, 발표 {res['check'].get('issues')}회, "
-          f"누락 {len(res['check'].get('missing_issues', []))}회")
+    chk = res["check"]
+    print(f"[예보] {'+'.join(chk.get('formats', []))} 격자 {chk['location']}, 발표 {chk.get('issues')}회, "
+          f"누락 {len(chk.get('missing_issues', []))}회, 일부만 있는 발표 {len({t for t, *_ in chk.get('short_issues', [])})}회")
     print(f"[Rs 계수] {res['coef']['source']}")
     print(f"[주 방법] {res['main']}" + (" (하늘상태 포함, 월 단위 교차검증 계수)" if res["main"] == "S4" else ""))
     if res["coef"].get("a") is None:

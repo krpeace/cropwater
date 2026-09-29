@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """02-Cycle 단기예보 모듈 단위 테스트 (pytest)
-  fcst_archive: 포털 CSV 파싱, 발표·선행시간 → 대상시각, TMX/TMN 대상일, 지나간 시각 채움, 연장기간 코드 변환
+  fcst_archive: 포털 CSV·OpenAPI 응답 CSV 파싱, 발표·선행시간 → 대상시각, TMX/TMN 대상일, 지나간 시각 채움, 연장기간 코드 변환
   rs_model    : Rs 추정·계수 적합·계수 파일 2계층
   obs_daily   : Kc (01-Cycle 설정과 같은 식)
   cropwater_fcst / fcst_report : 지표·판정, 엑셀 PM 수식 = 파이썬 PM
@@ -434,3 +434,68 @@ def test_sky_coef_file_roundtrip(tmp_path):
     c = load_sky_coef("101", p)
     assert sorted(c) == [0, 1, 2, 3, 4] and c[2] == pytest.approx((0.22, 0.1, -0.1, -0.1, -0.2))
     assert load_sky_coef("216", p)[0][0] == pytest.approx(0.3) and load_sky_coef("999", p) == {}
+
+
+# ── OpenAPI 응답 CSV (단기예보 조회서비스, 2025년 자료) ─────────────────────
+API_HDR = "baseDate,baseTime,category,fcstDate,fcstTime,fcstValue,nx,ny\n"
+
+
+def _api(issue, rows):
+    """rows: [(요소, 예보시각, 값)] → 응답 CSV 줄들 (시각은 앞의 0을 뺀 API 표기: 200, 0 …)"""
+    i = TS(issue)
+    return "".join(f"{i:%Y%m%d},{i.hour * 100},{c},{TS(t):%Y%m%d},{TS(t).hour * 100},{v},73,134\n" for c, t, v in rows)
+
+
+def _api_file(tmp_path):
+    prev = _api("2025-03-31 23:00", [(c, f"2025-04-01 {h:02d}:00", v) for h in range(6)
+                                     for c, v in (("TMP", 10), ("PCP", "강수없음"))])
+    run = _api("2025-04-01 02:00", [("TMP", "2025-04-01 03:00", 20), ("PCP", "2025-04-01 03:00", "1mm 미만"),
+                                    ("TMP", "2025-04-01 04:00", 20), ("PCP", "2025-04-01 04:00", "2.0mm"),
+                                    ("TMP", "2025-04-01 05:00", 20), ("PCP", "2025-04-01 05:00", "강수없음"),
+                                    ("TMN", "2025-04-01 06:00", 5), ("TMX", "2025-04-01 15:00", 18),
+                                    ("WAV", "2025-04-01 03:00", -999)])
+    again = _api("2025-04-01 02:00", [("TMP", "2025-04-01 05:00", 21)])       # 같은 칸이 다시 오면 뒤의 값
+    p = tmp_path / "단기예보_20250401.csv"
+    p.write_text("\ufeff" + API_HDR + prev + ",,,,,,,\n,,,,,,,\n" + API_HDR + run + again, encoding="utf-8")
+    return p
+
+
+def test_read_openapi_csv_strings_blank_rows_duplicates(tmp_path):
+    from fcst_archive import PCP_LT1_MM, is_openapi_csv, pcp_mm, read_openapi_csv
+    p = _api_file(tmp_path)
+    assert is_openapi_csv(p)
+    q = tmp_path / "portal.csv"
+    q.write_text(" format: day(UTC),hour(UTC),forecast,value,day(KST),hour(KST) location:73_134 Start : 20260401\n", encoding="utf-8")
+    assert not is_openapi_csv(q)
+    locs, t = read_openapi_csv(p)
+    assert locs == {"73_134"} and set(t) == {"TMP", "PCP", "TMX", "TMN"}      # 쓰지 않는 요소(WAV)는 읽지 않음
+    tmp = t["TMP"][t["TMP"].issue == TS("2025-04-01 02:00")]
+    assert list(tmp.forecast) == [1, 2, 3] and list(tmp.value) == [20, 20, 21]   # lead = 예보시각 − 발표시각
+    pcp = t["PCP"][t["PCP"].issue == TS("2025-04-01 02:00")]
+    assert list(pcp.value) == [PCP_LT1_MM, 2.0, 0.0]
+    assert list(t["TMX"].target_date) == [TS("2025-04-01")] and list(t["TMN"].value) == [5]
+    assert (pcp_mm("30.0~50.0mm"), pcp_mm("50.0mm 이상"), pcp_mm("0.3"), pcp_mm("1.0mm 미만")) == (40.0, 50.0, 0.3, PCP_LT1_MM)
+    assert math.isnan(pcp_mm("?"))
+
+
+def test_openapi_archive_fills_only_hours_before_first_lead(tmp_path):
+    from fcst_archive import PCP_LT1_MM, check_archive
+    a = Archive()
+    assert set(a.add_file(str(_api_file(tmp_path)))) == {"TMP", "PCP", "TMX", "TMN"}
+    run = TS("2025-04-01 02:00")
+    d = daily_inputs(a, run, [TS("2025-04-01")]).iloc[0]
+    assert d.hours == 6 and d.filled == 3            # 00~02시만 전날 23시 발표, 03시부터는 02시 발표 자체의 값
+    assert (d.Tmax, d.Tmin) == (18, 5) and d.rain == pytest.approx(PCP_LT1_MM + 2.0) and d.rain_flag == 1
+    rep = check_archive(a)
+    assert rep["formats"] == ["openapi"] and rep["location"] == ["73_134"]
+
+
+def test_check_archive_reports_partial_issue(tmp_path):
+    from fcst_archive import check_archive
+    txt = API_HDR
+    for day, n in (("2025-04-01", 5), ("2025-04-02", 5), ("2025-04-03", 3)):      # 4/3 발표는 앞부분이 잘림
+        txt += _api(f"{day} 02:00", [("TMP", TS(f"{day} 08:00") - pd.Timedelta(hours=h), 15) for h in range(n)][::-1])
+    p = tmp_path / "api.csv"
+    p.write_text(txt, encoding="utf-8")
+    a = Archive(); a.add_file(str(p))
+    assert check_archive(a)["short_issues"] == [("2025-04-03 02:00:00", "TMP", 3, 5)]

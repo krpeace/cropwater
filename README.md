@@ -125,7 +125,7 @@ python cropwater_multi.py --stns 101,119,131,146,156,136,216 --start 20260401 --
 # Rs 계수 보정: 검증 연도와 다른 해의 cropwater_station.py 출력 워크북 → rs_coef.csv
 python cropwater_fcst.py calib --obs output/eto101_apple_20250101_20251231.xlsx --stn 101
 
-# H2 검증: 기상자료개방포털 과거 단기예보 CSV 폴더 + 검증 연도 워크북 → 검증 엑셀
+# H2 검증: 과거 단기예보 CSV 폴더(포털 요소별 CSV 또는 OpenAPI 응답 CSV) + 검증 연도 워크북 → 검증 엑셀
 #   하늘상태(SKY) CSV가 함께 있으면 주 방법이 S4(하늘상태 반영)가 됨
 python cropwater_fcst.py verify --fcst data/fcst_101 --obs output/eto101_apple_20260101_20260928.xlsx --stn 101
 
@@ -135,7 +135,7 @@ python cropwater_fcst.py calib-sky --fcst data/fcst_101 --obs output/eto101_appl
 
 | 파라미터 | 설명 |
 | :--- | :--- |
-| `--fcst` | 과거 단기예보 CSV 폴더 또는 파일들 (필수 TMX·TMN·TMP·REH·WSD·PCP, 선택 SKY·POP. 여러 달을 한 파일로 받아도 됨) |
+| `--fcst` | 과거 단기예보 CSV 폴더 또는 파일들 (필수 TMX·TMN·TMP·REH·WSD·PCP, 선택 SKY·POP. 여러 달을 한 파일로 받아도 됨). 형식은 첫 줄로 자동 판별: 기상자료개방포털 요소별 CSV, 또는 OpenAPI(단기예보 조회서비스) 응답을 모은 CSV(`baseDate,baseTime,category,fcstDate,fcstTime,fcstValue,nx,ny`, 한 파일에 모든 요소, 하루 8회 발표를 모두 받음) |
 | `--obs` | `cropwater_station.py` 출력 워크북 (관측 기준값·Kc 설정). 첫 발표 7일 전부터 포함 |
 | `--stn` | ASOS 지점 번호 (rs_coef.csv 행 선택) |
 | `--coef` / `--out` | 계수 파일(기본 `rs_coef.csv`, 현재 폴더에 없으면 스크립트 폴더) / 출력 파일명 (기본 `output/fcst_verify(지점)_격자_시작_끝.xlsx`) |
@@ -236,7 +236,7 @@ cropwater/
 ├── cropwater_multi.py          ← 다지점 비교 → 히트맵 + 차트
 │
 ├── cropwater_fcst.py           ← (02-Cycle) 단기예보 ETo·ETc 예측 검증 CLI: calib / calib-sky / verify
-├── fcst_archive.py             ← 과거 단기예보 CSV 파싱 → 발표별 일 입력
+├── fcst_archive.py             ← 과거 단기예보 CSV 파싱(포털·OpenAPI 형식) → 발표별 일 입력
 ├── rs_model.py                 ← 일사량(Rs) 추정: S3 식(50) + 강수유무, S4 + 하늘상태 구름 비율, 계수 적합
 ├── obs_daily.py                ← cropwater_station 워크북 → 관측 ETo·Kc
 ├── fcst_report.py              ← 검증 엑셀 (11~13시트, 라이브 수식)

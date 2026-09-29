@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-fcst_archive.py — 기상자료개방포털 '과거 단기예보(격자)' CSV 파서와 발표별 일 집계 (02-Cycle 1단계)
+fcst_archive.py — 과거 단기예보 CSV 파서(기상자료개방포털 · OpenAPI 응답)와 발표별 일 집계 (02-Cycle 1단계)
 
 [입력 파일 형식] (포털 내려받기, 요소·월별 1파일)
   format: day(UTC),hour(UTC),forecast,value,day(KST),hour(KST)  location:73_135 Start : 20260401
@@ -33,6 +33,17 @@ fcst_archive.py — 기상자료개방포털 '과거 단기예보(격자)' CSV �
   - 서비스 발표는 필수 6요소가 모두 있는 발표만 쓴다. 빠진 발표는 service_table()이 arch.skipped_runs에 기록.
 
 [여러 달 파일] 'Start : YYYYMMDD'(UTC 날짜) 행마다 연월을 갱신한다(행의 day(UTC)는 그 달의 일자).
+
+[OpenAPI 응답 CSV] 단기예보 조회서비스(VilageFcstInfoService_2.0 getVilageFcst) 응답 항목을 모은 CSV도 읽는다.
+  baseDate,baseTime,category,fcstDate,fcstTime,fcstValue,nx,ny
+  20250401,200,TMP,20250401,300,0,73,134
+  - 한 파일에 모든 요소(category)가 들어 있다. 발표·예보 일시는 KST. 발표는 하루 8회(02·05·…·23시)
+  - lead = 예보시각 − 발표시각(h). API는 발표 1시간 뒤부터 준다(포털은 6시간 뒤부터)
+      → 02시 발표의 오늘 00~02시만 전날 23시 발표로 채운다(03~07시는 그 발표 자체의 값)
+  - TMX·TMN: 대상일 = fcstDate (TMN 06시, TMX 15시 칸)
+  - PCP 문자열: "강수없음" 0, "1mm 미만" PCP_LT1_MM, "30.0~50.0mm" 40, "50.0mm 이상" 50, "3.0mm" 3.
+    숫자로만 온 값(글피 1시간 칸의 0.1~ 소수, 연장기간 코드 0~3)은 그대로
+  - 빈 줄(',,,,,,,')·반복된 머리행은 건너뛰고, 같은 발표·요소·예보시각이 두 번 있으면 뒤의 값을 쓴다
 """
 import csv, datetime as dt, math, os, re
 from collections import defaultdict
@@ -51,6 +62,11 @@ WSD_CODE1_CAP = 3.9
 PCP_CODE_MMH = {1: 1.5, 2: 9.0, 3: 20.0}
 RAIN_FLAG_MM = 1.0
 MISSING_ABS = 900.0                   # 활용가이드: +900 이상 / −900 이하는 결측 (포털 CSV는 −999.9)
+# OpenAPI 강수 문자열 → mm/h (ARCHITECTURE 7장 '강수 문자열'). 포털 과거자료는 정수 mm라 '1mm 미만'이 0으로 보임
+API_COLS = ("baseDate", "baseTime", "category", "fcstDate", "fcstTime", "fcstValue")
+PCP_LT1_MM = 0.5                      # "1mm 미만" (0.1~0.9 mm)
+PCP_30_50_MM = 40.0                   # "30.0~50.0mm"
+PCP_GE50_MM = 50.0                    # "50.0mm 이상"
 
 
 def _svp(t):
@@ -124,6 +140,70 @@ def detect_element(path, df):
     return "TMP"                                         # 기온: 정수 ℃
 
 
+def is_openapi_csv(path):
+    """첫 줄(빈 줄 제외)이 OpenAPI 응답 열 이름(baseDate, …, fcstValue)이면 True"""
+    with open(path, encoding="utf-8-sig", errors="replace") as f:
+        for line in f:
+            s = line.strip().lstrip("\ufeff").replace('"', "")
+            if s:
+                return all(c in s.split(",") for c in API_COLS)
+    return False
+
+
+def pcp_mm(s):
+    """OpenAPI 강수(PCP) 값 → mm/h. 읽을 수 없으면 NaN"""
+    s = str(s).strip()
+    if s in ("강수없음", "-", ""):
+        return 0.0
+    if "미만" in s:
+        return PCP_LT1_MM
+    if "~" in s:
+        return PCP_30_50_MM
+    if "이상" in s:
+        return PCP_GE50_MM
+    try:
+        return float(s.replace("mm", ""))
+    except ValueError:
+        return float("nan")
+
+
+def read_openapi_csv(path, elements=ELEMENTS + OPTIONAL):
+    """OpenAPI 응답 CSV 1개 → (격자 집합 {'nx_ny'}, {요소: DataFrame})
+       1시간 요소: DataFrame[issue, forecast(= lead h), value] — read_portal_csv와 같은 모양
+       TMX·TMN : DataFrame[issue, target_date, value] (대상일 = fcstDate)
+       결측(|값| ≥ 900, 읽을 수 없는 값) 행은 버리고 개수를 df.attrs["n_missing"]에 남긴다."""
+    d = pd.read_csv(path, encoding="utf-8-sig", dtype=str, skipinitialspace=True)
+    d.columns = [c.strip().lstrip("\ufeff") for c in d.columns]
+    d = d.dropna(subset=["baseDate", "category"])
+    d = d[d["baseDate"].str.strip() != "baseDate"]                 # 파일을 이어 붙일 때 반복된 머리행
+    d = d.assign(**{c: d[c].str.strip() for c in API_COLS})
+    d = d.drop_duplicates(["baseDate", "baseTime", "category", "fcstDate", "fcstTime"], keep="last")
+    locs = set((d["nx"].str.strip() + "_" + d["ny"].str.strip()).unique()) if {"nx", "ny"} <= set(d.columns) else set()
+    issue = pd.to_datetime(d["baseDate"] + d["baseTime"].str.zfill(4), format="%Y%m%d%H%M")
+    target = pd.to_datetime(d["fcstDate"] + d["fcstTime"].str.zfill(4), format="%Y%m%d%H%M")
+    out = {}
+    for e in elements:
+        m = (d["category"] == e).values
+        if not m.any():
+            continue
+        raw = d.loc[m, "fcstValue"]
+        if e == "PCP":
+            conv = {s: pcp_mm(s) for s in raw.unique()}
+            v = raw.map(conv).astype(float)
+        else:
+            v = pd.to_numeric(raw, errors="coerce")
+        bad = (v.isna() | (v.abs() >= MISSING_ABS)).values
+        iss, tgt, val = issue[m][~bad], target[m][~bad], v[~bad]
+        if e in ("TMX", "TMN"):
+            df = pd.DataFrame({"issue": iss.values, "target_date": tgt.dt.normalize().values, "value": val.values})
+        else:
+            lead = ((tgt - iss) / pd.Timedelta(hours=1)).round().astype(int)
+            df = pd.DataFrame({"issue": iss.values, "forecast": lead.values, "value": val.values})
+        df.attrs["n_missing"] = int(bad.sum())
+        out[e] = df.reset_index(drop=True)
+    return locs, out
+
+
 # ── 아카이브 ───────────────────────────────────────────────────────────
 class Archive:
     """요소별 과거 예보 묶음. hourly[elem]: issue, lead, target, value, code(bool); daily[elem]: issue, target_date, value"""
@@ -132,6 +212,7 @@ class Archive:
         self.hourly, self.daily, self.location, self.files = {}, {}, set(), defaultdict(list)
         self.n_missing = defaultdict(int)        # 요소별 결측값(±900) 행 수
         self.spans = defaultdict(list)           # 요소별 파일의 (첫 발표, 마지막 발표, 파일명) — 판별 중복 확인용
+        self.formats = set()                     # 읽은 파일 형식: "portal"(기상자료개방포털) / "openapi"(조회서비스 응답)
 
     @property
     def issues(self):
@@ -164,11 +245,25 @@ class Archive:
         return sorted(set.intersection(*sets)) if sets else []
 
     def add_file(self, path, element=None):
+        """CSV 1개를 더한다. 반환: 요소 이름(포털 파일) 또는 요소 이름 튜플(OpenAPI 파일 — 한 파일에 여러 요소)"""
         self._iss_cache = {}
+        if is_openapi_csv(path):
+            locs, tables = read_openapi_csv(path)
+            self.location |= locs
+            self.formats.add("openapi")
+            for elem, df in tables.items():
+                self._store(elem, df, path)
+            return tuple(tables)
         loc, df = read_portal_csv(path)
         elem = element or detect_element(path, df)
         if loc:
             self.location.add(loc)
+        self.formats.add("portal")
+        self._store(elem, df, path)
+        return elem
+
+    def _store(self, elem, df, path):
+        """요소 1개의 표(DataFrame[issue, forecast, value] 또는 TMX·TMN의 [issue, target_date, value])를 아카이브에 합친다"""
         self.files[elem].append(os.path.basename(path))
         self.n_missing[elem] += df.attrs.get("n_missing", 0)
         if elem == "SKY":                        # 코드표에 없는 값(예: 0)은 결측
@@ -178,14 +273,13 @@ class Archive:
         if len(df):
             self.spans[elem].append((df["issue"].min(), df["issue"].max(), os.path.basename(path)))
         if elem in ("TMX", "TMN"):
-            new = _daily_targets(df, elem)
+            new = df[["issue", "target_date", "value"]] if "target_date" in df else _daily_targets(df, elem)
             old = self.daily.get(elem)
             self.daily[elem] = new if old is None else pd.concat([old, new]).drop_duplicates(["issue", "target_date"], keep="last")
         else:
             new = _hourly_targets(df)
             old = self.hourly.get(elem)
             self.hourly[elem] = new if old is None else pd.concat([old, new]).drop_duplicates(["issue", "lead"], keep="last")
-        return elem
 
 
 def _daily_targets(df, elem):
@@ -225,7 +319,8 @@ def load_archive(paths, elements=None):
 
 def check_archive(arch):
     """G1 점검용 구조 확인 결과(dict). 발표 누락, 요소별 발표당 행수 패턴, 격자 일관성."""
-    rep = {"location": sorted(arch.location), "elements": {e: len(arch.files[e]) for e in arch.files}}
+    rep = {"location": sorted(arch.location), "elements": {e: len(arch.files[e]) for e in arch.files},
+           "formats": sorted(getattr(arch, "formats", set()))}
     iss = arch.required_issues
     if iss:
         full = pd.date_range(iss[0], iss[-1], freq="3h")
@@ -247,8 +342,20 @@ def check_archive(arch):
             sp = sorted(sp)
             for (a0, a1, fa), (b0, b1, fb) in zip(sp, sp[1:]):
                 if b0 <= a1:
-                    warn.append(f"{e}: {fa} ↔ {fb} 발표 범위 겹침(요소 판별 확인)")
+                    warn.append(f"{e}: {fa} ↔ {fb} 발표 범위 겹침(요소 판별 또는 중복 파일 확인 — 겹친 칸은 나중 파일 값)")
         rep["warnings"] = warn
+        # 일부만 받은 발표: 같은 발표시각(시)의 보통 행 수(최빈값)보다 적은 발표 — 내려받기 중단·편집 흔적 확인용
+        short = []
+        for e in ELEMENTS + OPTIONAL:
+            d = arch.hourly.get(e) if e in arch.hourly else arch.daily.get(e)
+            if d is None or not len(d):
+                continue
+            c = d.groupby("issue").size()
+            mode = c.groupby(c.index.hour).agg(lambda s: int(s.mode().iloc[0]))
+            for t, n in c.items():
+                if n < mode[t.hour]:
+                    short.append((str(t), e, int(n), int(mode[t.hour])))
+        rep["short_issues"] = sorted(short)
     if "TMX" in arch.daily:
         c = arch.daily["TMX"].groupby("issue").size()
         rep["TMX_rows_by_hour"] = c.groupby(c.index.hour).agg(lambda s: sorted(set(s))).to_dict()
