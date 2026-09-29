@@ -3,3 +3,6 @@
 
 requests>=2.28.0       # 기상청 OpenAPI HTTP 요청
 openpyxl>=3.1.0        # Excel (.xlsx) 파일 생성 및 편집
+pandas>=2.0.0          # (02-Cycle) 단기예보·관측 표 처리
+numpy>=1.24.0          # (02-Cycle) Rs 계수 적합·지표 계산
+pytest>=7.0.0          # 단위 테스트 (tests/)
