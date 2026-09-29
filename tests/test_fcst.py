@@ -211,3 +211,115 @@ def test_grid_comparison_direct_difference():
     ra = m[(m.grid == "A") & (m.run_name == "아침") & (m.lead_day == 1)].RMSE.iloc[0]
     rb = m[(m.grid == "B") & (m.run_name == "아침") & (m.lead_day == 1)].RMSE.iloc[0]
     assert ra == pytest.approx(0.2) and rb == pytest.approx(0.3)
+
+
+# ── 결측·자료 공백 ────────────────────────────────────────────────────
+def test_missing_values_dropped_and_counted(tmp_path):
+    p = tmp_path / "x.csv"
+    p.write_text(" format: day(UTC),hour(UTC),forecast,value,day(KST),hour(KST) location:73_134 Start : 20260701\n"
+                 "1,1700,+6,21.0,2,0200\n1,1700,+7,-999.900024,2,0200\n1,1700,+8,901.0,2,0200\n", encoding="utf-8")
+    loc, df = read_portal_csv(p)
+    assert len(df) == 1 and df.attrs["n_missing"] == 2
+
+
+def test_detect_rainy_month_precipitation():
+    # 장마철: 비 오는 시각이 30%여도(0 비율 70%) 강수로 판별해야 함 (기온·풍속과 구분)
+    v = [0.0] * 70 + [1.0, 2.0, 5.0, 12.0, 30.0, 3.0] * 5
+    df = pd.DataFrame({"issue": [TS("2026-07-01 02:00") + pd.Timedelta(hours=3 * (i // 20)) for i in range(len(v))],
+                       "forecast": [6 + i % 20 for i in range(len(v))], "value": v})
+    assert detect_element("x.csv", df) == "PCP"
+
+
+def test_service_table_skips_incomplete_runs():
+    a, run = _archive()
+    # 같은 날 17시 발표가 TMP에만 있고 나머지 요소에는 없음 → 저녁 발표는 제외되어야 함
+    ev = TS("2026-04-02 17:00")
+    a.hourly["TMP"] = pd.concat([a.hourly["TMP"], _hourly(str(ev), [7, 8], [15.0, 14.0])])
+    st = service_table(a, runs={"아침": (2, range(0, 4)), "저녁": (17, range(1, 5))})
+    assert set(st.run) == {run}
+    skipped = {(n, t) for n, t, _ in a.skipped_runs}
+    assert ("저녁", ev) in skipped
+    miss = dict(((n, t), m) for n, t, m in a.skipped_runs)[("저녁", ev)]
+    assert "TMX" in miss and "TMP" not in miss
+
+
+def test_split_verifiable_and_strict_cum3():
+    from cropwater_fcst import cum3, split_verifiable
+    rows = []
+    for k in range(4):   # 아침 발표 1회, D+2부터 관측 없음
+        rows.append(dict(run_name="아침", run=TS("2026-09-27 02:00"), lead_day=k, Tmax=25.0, Tmin=15.0, ea=1.5,
+                         u10=1.0, rain=0.0, ETo_S3=3.0, ETo_obs=(3.2 if k < 2 else np.nan), ETo_pers=3.1, ETo_7d=3.0))
+    df, dropped = split_verifiable(pd.DataFrame(rows))
+    assert len(df) == 2 and set(dropped.drop_reason) == {"대상일 관측 없음"}
+    c, s = cum3(df)
+    assert len(c) == 0          # D+0~D+2 중 D+2가 없으므로 3일 누적에서 제외
+
+
+# ── 월별 지표·판정 불확실성·Rs 계수 재보정 ────────────────────────────
+def _month_df(err_apr=0.5, err_may=-1.0):
+    rows = []
+    for rn, h, ks in (("아침", 2, (0, 1, 2, 3)), ("저녁", 17, (1, 2, 3, 4))):
+        for day in pd.date_range("2026-04-01", "2026-05-31"):
+            run = day + pd.Timedelta(hours=h)
+            for k in ks:
+                t = day + pd.Timedelta(days=k)
+                o = 3.0 + (t.day % 3)
+                e = err_apr if t.month == 4 else err_may
+                rows.append(dict(run=run, run_date=day, run_name=rn, lead_day=k, target=t, ETo_obs=o, ETo_S3=o + e,
+                                 ETo_pers=o + (1.0 if t.day % 2 else -1.0), ETo_7d=o + 0.8,
+                                 Tmax=24.5, Tmax_obs=25.0, Tmin=12.3, Tmin_obs=12.0, ea=1.2, ea_obs=1.1, u10=1.5, u10_obs=2.0,
+                                 Rs_S3=17.0, Rs_obs=19.0, rain_flag=int(t.day % 4 == 0), flag_obs=0))
+    df = pd.DataFrame(rows)
+    return df[df.target.dt.month.isin([4, 5])].reset_index(drop=True)
+
+
+def test_month_metrics_and_verdict():
+    from cropwater_fcst import month_metrics, month_verdict
+    mm = month_metrics(_month_df())
+    a = mm[(mm.run_name == "아침") & (mm.lead_day == 1) & (mm.month == 4)].iloc[0]
+    assert a.RMSE == pytest.approx(0.5) and a.MBE == pytest.approx(0.5) and a.skill_pers == pytest.approx(0.5)
+    assert a.dTmax == pytest.approx(-0.5) and a.ddT == pytest.approx(-0.8) and a.dRs == pytest.approx(-2.0)
+    assert a.false_alarm == int((a.rain_fcst * a.n).round()) and a.miss == 0
+    m = mm[(mm.run_name == "저녁") & (mm.lead_day == 2) & (mm.month == 5)].iloc[0]
+    assert m.RMSE == pytest.approx(1.0) and m.skill_pers == pytest.approx(0.0)
+    assert list(mm.run_name.unique()) == ["아침", "저녁"] and set(mm.lead_day) == {1, 2, 3}
+    v = month_verdict(mm).set_index(["run_name", "month"])
+    assert v.loc[("아침", 4), "pass_"] and not v.loc[("아침", 5), "pass_"]
+    assert v.loc[("저녁", 5), "rmse_d1"] == pytest.approx(1.0)
+
+
+def test_bootstrap_h2_bounds_and_reproducible():
+    from cropwater_fcst import bootstrap_h2
+    good = bootstrap_h2(_month_df(0.5, 0.5), n_boot=200)
+    assert good["pass_all"] == 1.0 and good["n_days"] == 60      # 5/31 발표는 대상일이 6월이라 빠짐
+    assert good["runs"]["아침"]["rmse_d1"] == pytest.approx((0.5, 0.5, 0.5))
+    assert good["runs"]["저녁"]["min_skill"] == pytest.approx((0.5, 0.5, 0.5))
+    bad = bootstrap_h2(_month_df(1.2, 1.2), n_boot=200)
+    assert bad["runs"]["아침"]["pass_frac"] == 0.0 and bad["pass_all"] == 0.0
+    mix = _month_df(0.5, -1.1)          # 4월 좋음, 5월 기준 초과 → 뽑힌 날에 따라 판정이 갈림
+    a, b = bootstrap_h2(mix, n_boot=300), bootstrap_h2(mix, n_boot=300)
+    assert a == b                          # 시드 고정 → 재현
+    assert 0.0 < a["runs"]["아침"]["pass_frac"] < 1.0
+    lo, mid, hi = a["runs"]["아침"]["rmse_d1"]
+    assert lo < mid < hi
+
+
+def test_fit_rs_forecast_recovers_coefficients():
+    from cropwater_fcst import fit_rs_forecast
+    rng = np.random.default_rng(3)
+    n = 120
+    tx = 20 + 8 * rng.random(n); tn = tx - (4 + 10 * rng.random(n)); flag = (rng.random(n) < 0.3).astype(int)
+    ra = 30 + 10 * rng.random(n)
+    t = pd.DataFrame(dict(Tmax=tx, Tmin=tn, rain_flag=flag, Ra=ra,
+                          Rs_obs=(-0.05 + 0.17 * np.sqrt(tx - tn) - 0.12 * flag) * ra))
+    a, b, c = fit_rs_forecast(t)
+    assert (a, b, c) == pytest.approx((-0.05, 0.17, -0.12), abs=1e-9)
+
+
+def test_wrap_text_display_width():
+    from fcst_report import _disp_width, _wrap_text
+    assert _disp_width("가a") == 3
+    s = "④ 판정 불확실성: " + " ".join(["아침 0.88~1.08"] * 20)
+    parts = _wrap_text(s, 60)
+    assert all(_disp_width(p) <= 60 for p in parts) and len(parts) > 1
+    assert " ".join(p.strip() for p in parts) == s

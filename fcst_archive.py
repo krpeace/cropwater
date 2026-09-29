@@ -22,6 +22,10 @@ fcst_archive.py — 기상자료개방포털 '과거 단기예보(격자)' CSV �
   - ea = 시간별 e°(TMP)·REH/100 의 평균, u10 = WSD 평균, 강수 = PCP 합
   - 연장기간 코드: WSD 1 → 같은 발표의 직전 정량일 평균(최대 3.9), 2 → 6.5, 3 → 11 m/s
                    PCP 1 → 1.5, 2 → 9, 3 → 20 mm/h (3시간 칸이므로 ×3)
+
+[결측]
+  - 값이 ±900 이상(예: −999.9)이면 결측으로 버린다.
+  - 서비스 발표는 6요소가 모두 있는 발표만 쓴다. 빠진 발표는 service_table()이 arch.skipped_runs에 기록.
 """
 import csv, datetime as dt, math, os, re
 from collections import defaultdict
@@ -36,6 +40,7 @@ WSD_CODE = {2: 6.5, 3: 11.0}          # 코드 1은 직전 정량일 평균(최�
 WSD_CODE1_CAP = 3.9
 PCP_CODE_MMH = {1: 1.5, 2: 9.0, 3: 20.0}
 RAIN_FLAG_MM = 1.0
+MISSING_ABS = 900.0                   # 활용가이드: +900 이상 / −900 이하는 결측 (포털 CSV는 −999.9)
 
 
 def _svp(t):
@@ -44,7 +49,8 @@ def _svp(t):
 
 # ── 파일 읽기 ─────────────────────────────────────────────────────────
 def read_portal_csv(path):
-    """포털 CSV 1개 → (location 'nx_ny', DataFrame[issue(KST), forecast, value])"""
+    """포털 CSV 1개 → (location 'nx_ny', DataFrame[issue(KST), forecast, value])
+       결측값(|값| ≥ 900, 예: −999.9) 행은 버리고 개수를 df.attrs["n_missing"]에 남긴다."""
     loc, recs = None, []
     with open(path, encoding="utf-8-sig", errors="replace") as f:
         for line in f:
@@ -68,6 +74,9 @@ def read_portal_csv(path):
             issue_utc = base + dt.timedelta(hours=int(hour_u[:2]))
             recs.append((issue_utc + dt.timedelta(hours=9), int(p[2].replace("+", "")), float(p[3])))
     df = pd.DataFrame(recs, columns=["issue", "forecast", "value"])
+    bad = df["value"].abs() >= MISSING_ABS
+    df = df[~bad].reset_index(drop=True)
+    df.attrs["n_missing"] = int(bad.sum())
     return loc, df
 
 
@@ -87,12 +96,12 @@ def detect_element(path, df):
             return "TMN"                                 # 일최저: 02시 발표만 오늘 값 포함, 17~23시는 4일
         return "TMX" if v.mean() >= 20 else "TMN"
     if (v.round(6) % 5 == 0).mean() > 0.99 and v.min() >= 0 and v.max() <= 100 and v.mean() > 20:
-        return "REH"
-    if (v == 0).mean() > 0.8:
-        return "PCP"
+        return "REH"                                     # 습도: 5% 단위, 0~100
+    if v.min() >= 0 and v.median() == 0:
+        return "PCP"                                     # 강수: 음수 없음, 비 오는 시각은 절반 미만(장마철 포함)
     if v.max() <= 30 and (v.round(1) != v.round(0)).mean() > 0.3:
-        return "WSD"
-    return "TMP"
+        return "WSD"                                     # 풍속: 0.1 m/s 단위 소수
+    return "TMP"                                         # 기온: 정수 ℃
 
 
 # ── 아카이브 ───────────────────────────────────────────────────────────
@@ -101,6 +110,8 @@ class Archive:
 
     def __init__(self):
         self.hourly, self.daily, self.location, self.files = {}, {}, set(), defaultdict(list)
+        self.n_missing = defaultdict(int)        # 요소별 결측값(±900) 행 수
+        self.spans = defaultdict(list)           # 요소별 파일의 (첫 발표, 마지막 발표, 파일명) — 판별 중복 확인용
 
     @property
     def issues(self):
@@ -109,12 +120,21 @@ class Archive:
             s |= set(d["issue"])
         return sorted(s)
 
+    @property
+    def complete_issues(self):
+        """모든 요소에 값이 있는 발표시각 (서비스 발표는 이 중에서만 고른다)"""
+        sets = [set(d["issue"]) for d in list(self.hourly.values()) + list(self.daily.values())]
+        return sorted(set.intersection(*sets)) if sets else []
+
     def add_file(self, path, element=None):
         loc, df = read_portal_csv(path)
         elem = element or detect_element(path, df)
         if loc:
             self.location.add(loc)
         self.files[elem].append(os.path.basename(path))
+        self.n_missing[elem] += df.attrs.get("n_missing", 0)
+        if len(df):
+            self.spans[elem].append((df["issue"].min(), df["issue"].max(), os.path.basename(path)))
         if elem in ("TMX", "TMN"):
             new = _daily_targets(df, elem)
             old = self.daily.get(elem)
@@ -167,8 +187,26 @@ def check_archive(arch):
     iss = arch.issues
     if iss:
         full = pd.date_range(iss[0], iss[-1], freq="3h")
-        rep["issues"] = len(iss)
-        rep["missing_issues"] = [str(t) for t in full if t not in set(iss)]
+        comp = set(arch.complete_issues)
+        rep["first_issue"], rep["last_issue"] = str(iss[0]), str(iss[-1])
+        rep["issues"] = len(comp)                                        # 6요소가 모두 있는 발표 수
+        rep["missing_issues"] = [str(t) for t in full if t not in comp]  # 한 요소라도 없는 발표
+        cov = {}
+        for e in ELEMENTS:
+            d = arch.hourly.get(e) if e in arch.hourly else arch.daily.get(e)
+            have = set(d["issue"]) if d is not None else set()
+            cov[e] = dict(files=len(arch.files.get(e, [])), first=str(min(have)) if have else "",
+                          last=str(max(have)) if have else "", issues=len(have),
+                          missing_issues=sum(1 for t in full if t not in have), missing_values=arch.n_missing.get(e, 0))
+        rep["coverage"] = cov
+        # 같은 요소로 판별된 파일의 발표 범위가 겹치면 요소 판별 오류일 수 있음
+        warn = []
+        for e, sp in arch.spans.items():
+            sp = sorted(sp)
+            for (a0, a1, fa), (b0, b1, fb) in zip(sp, sp[1:]):
+                if b0 <= a1:
+                    warn.append(f"{e}: {fa} ↔ {fb} 발표 범위 겹침(요소 판별 확인)")
+        rep["warnings"] = warn
     if "TMX" in arch.daily:
         c = arch.daily["TMX"].groupby("issue").size()
         rep["TMX_rows_by_hour"] = c.groupby(c.index.hour).agg(lambda s: sorted(set(s))).to_dict()
@@ -242,10 +280,18 @@ SERVICE_RUNS = {"아침": (2, range(0, 4)), "저녁": (17, range(1, 5))}   # 발
 
 
 def service_table(arch, runs=SERVICE_RUNS):
-    """모든 서비스 발표(02시·17시)에 대해 대상일별 일 입력을 한 표로"""
-    out = []
+    """모든 서비스 발표(02시·17시)에 대해 대상일별 일 입력을 한 표로.
+       한 요소라도 값이 없는 발표는 쓰지 않고 arch.skipped_runs에 (구분, 발표시각, 빠진 요소)를 남긴다.
+       (다른 발표로 대신 채우면 '그 발표의 예보' 검증이 아니게 되므로)"""
+    out, comp, iss = [], set(arch.complete_issues), arch.issues
+    arch.skipped_runs = []
+    full = pd.date_range(iss[0], iss[-1], freq="3h") if iss else []
+    have = {e: set(d["issue"]) for e, d in list(arch.hourly.items()) + list(arch.daily.items())}
     for name, (hour, leads) in runs.items():
-        for run in [t for t in arch.issues if t.hour == hour]:
+        for run in [t for t in full if t.hour == hour]:
+            if run not in comp:
+                arch.skipped_runs.append((name, run, [e for e in ELEMENTS if run not in have.get(e, set())]))
+                continue
             df = daily_inputs(arch, run, [run.normalize() + pd.Timedelta(days=k) for k in leads])
             df.insert(0, "run", run); df.insert(0, "run_name", name)
             out.append(df)

@@ -3,10 +3,10 @@
 """
 fcst_report.py — 02-Cycle H2 검증 엑셀 (라이브 수식)
 
-시트: 요약 / 일별비교 / 3일누적 / 입력진단 / 오차분해 / Rs계수 / 관측 / 설정 / 방법 / 차트자료
-  - 값으로 넣는 것: 예보 일 입력(fcst_archive 집계), ASOS 관측 일자료, 오차분해(Python 계산)
-  - 나머지는 엑셀 수식: Ra·Rs·PM ETo·Kc·ETc·기준선·오차·지표·판정
-  - 노란 칸(설정·Rs계수·합격 기준)을 바꾸면 전체가 다시 계산된다
+시트: 요약 / 일별비교 / 3일누적 / 월별 / 입력진단 / 오차분해 / (격자비교) / Rs계수 / 관측 / 설정 / 방법 / 차트자료
+  - 값으로 넣는 것: 예보 일 입력(fcst_archive 집계), ASOS 관측 일자료, 오차분해·격자비교(Python 계산)
+  - 나머지는 엑셀 수식: Ra·Rs·PM ETo·Kc·ETc·기준선·오차·지표·판정·월별 지표
+  - 노란 칸(설정·Rs계수·합격 기준·월별 선행일)을 바꾸면 전체가 다시 계산된다
 """
 import datetime as dt
 
@@ -20,6 +20,12 @@ from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter as CL
 
 from fao56_core import safe_save
+from fcst_archive import SERVICE_RUNS
+
+
+def run_gaps(runs):
+    from cropwater_fcst import run_gaps as _rg
+    return _rg(runs)
 
 FONT = "맑은 고딕"; GREEN = "2E6A4C"; BLUE = "2B6E86"; BROWN = "A8681B"; LIGHT = "EFF1EC"; YEL = "FBEED2"
 PASS_FILL = "D8EAD3"; FAIL_FILL = "F4C7B8"
@@ -54,6 +60,24 @@ def T(ws, r, c, v, size=10, bold=False, color="1A1A1A", wrap=False):
 def widths(ws, spec):
     for col, w in spec.items():
         ws.column_dimensions[col].width = w
+
+
+def _disp_width(s):
+    """표시 폭 추정: 한글·전각 문자는 2, 나머지는 1"""
+    import unicodedata
+    return sum(2 if unicodedata.east_asian_width(ch) in "WF" else 1 for ch in str(s))
+
+
+def _wrap_text(s, width):
+    """표시 폭 width 이하로 공백에서 나눈 줄 목록. 둘째 줄부터는 두 칸 들여씀"""
+    out, cur = [], ""
+    for w in s.split(" "):
+        cand = f"{cur} {w}" if cur else w
+        if cur and _disp_width(cand) > width:
+            out.append(cur); cur = "   " + w
+        else:
+            cur = cand
+    return out + [cur] if cur else out
 
 
 def pm(tmax, tmin, ea, u2, rs, rso, t, es, d, g):
@@ -195,8 +219,9 @@ def sheet_rscoef(wb, res, obs_rows):
             x.border = BORDER; x.alignment = Alignment("center", "center")
         r += 1
     r += 1
-    T(ws, r, 1, "월별 편향 (S3 추정 ETo − 관측 ETo, mm/일)", 11, True, GREEN); r += 1
-    for j, h in enumerate(["월", "일수", "관측 ETo 평균", "S3 편향", "S1 편향"], 1):
+    T(ws, r, 1, "월별 편향 — 관측 입력에 Rs만 추정 (H1 조건). 편향 = 추정 − 관측", 11, True, GREEN); r += 1
+    for j, h in enumerate(["월", "일수", "관측 ETo 평균", "S3 ETo 편향 (mm/일)", "S1 ETo 편향 (mm/일)", "관측 Rs 평균",
+                           "S3 Rs 편향 (MJ/m²/일)"], 1):
         H(ws, r, j, h)
     r += 1
     for m in range(res["h1_start"].month, res["h1_end"].month + 1):
@@ -206,10 +231,14 @@ def sheet_rscoef(wb, res, obs_rows):
         ws.cell(r, 3, f"=IF(B{r}>0,SUMPRODUCT({mm}*{rng('X')})/B{r},0)")
         ws.cell(r, 4, f"=IF(B{r}>0,SUMPRODUCT({mm}*({rng('AE')}-{rng('X')}))/B{r},0)")
         ws.cell(r, 5, f"=IF(B{r}>0,SUMPRODUCT({mm}*({rng('AC')}-{rng('X')}))/B{r},0)")
-        for j, fmt in zip(range(2, 6), ["0", F2, F2, F2]):
+        ws.cell(r, 6, f"=IF(B{r}>0,SUMPRODUCT({mm}*{rng('I')})/B{r},0)")
+        ws.cell(r, 7, f"=IF(B{r}>0,SUMPRODUCT({mm}*({rng('AB')}-{rng('I')}))/B{r},0)")
+        for j, fmt in zip(range(2, 8), ["0", F2, F2, F2, F2, F2]):
             x = ws.cell(r, j); x.number_format = fmt; x.font = Font(name=FONT, size=10); x.border = BORDER
             x.alignment = Alignment("center", "center")
         r += 1
+    T(ws, r, 1, "월별 시트 ③의 Rs 편향(예보 입력으로 추정)과 비교하면, 예보 입력 탓과 추정식 자체 탓을 나눠 볼 수 있습니다.",
+      9, color="555555")
     widths(ws, {"A": 30, "B": 16, "C": 16, "D": 16, "E": 10, "F": 10, "G": 10, "H": 10, "I": 10})
     ws.column_dimensions["C"].width = 16
     return ws
@@ -363,7 +392,8 @@ def _ci(col):
 
 
 # ── 3일누적 ─────────────────────────────────────────────────────────────
-def sheet_cum3(wb, df, db_rows, run_ids):
+def sheet_cum3(wb, df, db_rows, run_ids, keep=None):
+    """keep: 3일 누적에 넣을 (구분, 발표) 집합 — 첫 3개 대상일이 모두 채점 가능한 발표만(cropwater_fcst.cum3와 같음)"""
     ws = wb.create_sheet("3일누적")
     T(ws, 1, 1, "발표별 첫 3개 대상일 누적 (아침 D+0~D+2, 저녁 D+1~D+3) — FAO-56은 추정 Rs 기반 ETo를 여러 날 합계로 쓰도록 권고", 11, True, GREEN)
     hdr = ["발표번호", "구분", "발표시각", "대상기간", "첫 선행일", "예보 ETo 3일합", "관측 ETo 3일합", "지속성 3일합",
@@ -373,11 +403,14 @@ def sheet_cum3(wb, df, db_rows, run_ids):
     d0, d1 = db_rows
     db = lambda col: f"일별비교!${col}${d0}:${col}${d1}"
     runs = df.drop_duplicates("run")[["run", "run_name"]].copy()
+    if keep is not None:
+        runs = runs[[(n, t) in keep for n, t in zip(runs.run_name, runs.run)]]
     runs["id"] = runs.run.map(run_ids)
     runs = runs.sort_values("id")
+    first = {n: min(ls) for n, (_, ls) in SERVICE_RUNS.items()}
     r = 3
     for row in runs.itertuples():
-        k0 = int(df[df.run == row.run].lead_day.min())
+        k0 = first.get(row.run_name, int(df[df.run == row.run].lead_day.min()))
         C(ws, r, 1, row.id); C(ws, r, 2, row.run_name); C(ws, r, 3, row.run.to_pydatetime(), DTM)
         C(ws, r, 4, f"D+{k0}~D+{k0 + 2}"); C(ws, r, 5, k0)
         s = lambda col: f'=SUMIFS({db(col)},{db("A")},$A{r},{db("E")},">="&$E{r},{db("E")},"<="&($E{r}+2))'
@@ -434,8 +467,9 @@ def sheet_diag(wb, db_rows, groups):
 # ── 오차분해 (Python 계산값) ─────────────────────────────────────────────
 def sheet_attr(wb, res):
     ws = wb.create_sheet("오차분해")
-    T(ws, 1, 1, "오차 분해와 편향 보정 탐색 — Python(cropwater_fcst.py) 계산값 (수식 아님)", 12, True, GREEN)
-    T(ws, 2, 1, "입력을 관측값으로 바꿔 PM을 다시 풀어야 해서 값으로 넣었습니다. 설정·계수를 바꿔도 이 시트는 다시 계산되지 않습니다.", 9, color=BROWN)
+    T(ws, 1, 1, "오차 분해·보정 탐색·판정 불확실성 — Python(cropwater_fcst.py) 계산값 (수식 아님)", 12, True, GREEN)
+    T(ws, 2, 1, "입력을 관측값으로 바꿔 PM을 다시 풀거나 표본을 반복 추출해야 해서 값으로 넣었습니다. "
+                "설정·계수를 바꿔도 이 시트는 다시 계산되지 않습니다.", 9, color=BROWN)
     att, names = res["attr"], res["attr_names"]
     r = 4
     T(ws, r, 1, "① 예보 입력을 하나씩 관측값으로 바꿨을 때의 ETo RMSE (mm/일, S3)", 11, True, GREEN); r += 1
@@ -453,8 +487,10 @@ def sheet_attr(wb, res):
     for n in notes:
         T(ws, r, 1, n, 9, color="555555"); r += 1
     r += 1
-    T(ws, r, 1, "② 지점 편향 보정 탐색 — 월 단위 교차검증 (보정값은 검증 달을 뺀 나머지 달로 추정)", 11, True, GREEN); r += 1
+    T(ws, r, 1, "② 지점 보정 탐색 — 월 단위 교차검증 (보정값은 검증 달을 뺀 나머지 달로 추정)", 11, True, GREEN); r += 1
     T(ws, r, 1, f"교차검증 묶음: {', '.join(res['bc_folds'])} (마지막 달 대상일이 10일 미만이면 앞 달에 포함). H2 판정에는 쓰지 않는 탐색 결과입니다.", 9, color="555555"); r += 1
+    T(ws, r, 1, "방법: 기온 보정 = Tmax·Tmin에서 평균 편향을 뺌 / 기온+풍속 = 풍속 편향도 뺌 / ETo 비율 = 예보 ETo × (관측 합 ÷ 예보 합) / "
+                "Rs 계수 재보정 = Rs 식의 a·b·c를 예보 일교차·예보 강수유무와 관측 Rs로 다시 맞춤", 9, color="555555"); r += 1
     bc = res["bc"]
     methods = list(dict.fromkeys(bc.method))
     for metric, label, fmt in (("RMSE", "RMSE (mm/일)", F3), ("MBE", "MBE (mm/일)", F3), ("skill_pers", "지속성 대비 개선율", PCT),
@@ -487,6 +523,34 @@ def sheet_attr(wb, res):
         for j, v in enumerate(row, 1):
             C(ws, r, j, v, F2 if j > 2 else None)
         r += 1
+    bt = res.get("boot")
+    if bt:
+        r += 1
+        T(ws, r, 1, f"④ 판정의 표본 불확실성 — {bt['block']}일 이동 블록 부트스트랩 {bt['n_boot']:,}회 "
+                    f"(발표일 {bt['n_days']}일, 난수 시드 {bt['seed']})", 11, True, GREEN); r += 1
+        hdr = ["D+1 RMSE 5%", "D+1 RMSE 중앙값", "D+1 RMSE 95%", "최소 개선율 5%", "최소 개선율 중앙값", "최소 개선율 95%",
+               "두 기준 충족 비율"]
+        variants = [("보정 없음 (판정 기준)", bt)] + [(f"{n} (탐색)", b) for n, b in (res.get("boot_bc") or {}).items()]
+        for name, b in variants:
+            H(ws, r, 1, name, fill=LIGHT, white=False); ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=2)
+            for j, h in enumerate(hdr, 3):
+                H(ws, r, j, h, size=9)
+            r += 1
+            for rn, v in b["runs"].items():
+                vals = [rn, "", *v["rmse_d1"], *v["min_skill"], v["pass_frac"]]
+                for j, x in enumerate(vals, 1):
+                    C(ws, r, j, x, PCT if j >= 6 else (F3 if j > 2 else None), bold=(j == 9))
+                r += 1
+            C(ws, r, 1, "두 발표 모두"); ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=2)
+            for j in range(3, 9):
+                C(ws, r, j, "")
+            C(ws, r, 9, b["pass_all"], PCT, bold=True); r += 1
+        for n in [f"발표일을 {bt['block']}일 묶음으로 복원추출해 지표를 다시 계산했습니다. 같은 날의 아침·저녁 발표와 D+1~D+3을 함께 뽑아 "
+                  "서로의 상관을 보존합니다. 90% 구간 = 5~95 백분위.",
+                  "두 기준 충족 비율 = 반복 중 'D+1~D+3 최소 개선율 ≥ 기준'과 'D+1 RMSE ≤ 기준'을 함께 만족한 비율(기준은 2026-09-29 확정값). "
+                  "90%보다 낮으면 점추정이 통과해도 기준과의 여유가 표본 변동보다 작다는 뜻입니다.",
+                  "보정 행은 ②의 월 단위 교차검증 보정값을 적용한 예보로 같은 계산을 한 탐색 결과입니다(H2 판정에는 쓰지 않음)."]:
+            T(ws, r, 1, n, 9, color="555555"); r += 1
     widths(ws, {"A": 12, "B": 8, **{CL(j): 15 for j in range(3, 11)}})
     return ws
 
@@ -550,6 +614,134 @@ def sheet_grid_compare(wb, res):
     return ws
 
 
+# ── 월별 (수식) ──────────────────────────────────────────────────────────
+SUM_CELLS = {}   # 요약 시트 합격 기준 셀 (sheet_summary가 채움, 월별 시트가 참조)
+
+
+def sheet_month(wb, df, db_rows):
+    """대상일 월별 성능(①)·달마다 기준 적용(②, 참고)·입력 편향(③). 모두 일별비교 시트를 참조하는 수식"""
+    ws = wb.create_sheet("월별")
+    d0, d1 = db_rows
+    db = lambda col: f"일별비교!${col}${d0}:${col}${d1}"
+    runs = [n for n in SERVICE_RUNS if n in set(df.run_name)]
+    months = sorted(int(m) for m in df.target.dt.month.unique())
+    T(ws, 1, 1, "월별 성능 — 생육기 안에서 어느 달이 약한가 (대상일 기준 월, 일별비교 시트를 참조하는 수식)", 12, True, GREEN)
+    T(ws, 2, 1, "달마다 기준을 적용한 결과는 원인 진단용 참고입니다. H2 판정은 요약 시트(전체 기간)로 합니다. "
+                "노란 칸의 선행일을 바꾸면 ①·③이 다시 계산됩니다.", 9, color=BROWN)
+    for c0, c1, label in ((1, 3, "선행일 k (①·③)"), (6, 7, "개선율 기준 ≥"), (9, 10, "D+1 RMSE 기준 ≤")):
+        for c in range(c0, c1 + 1):
+            C(ws, 4, c, label if c == c0 else None, left=True, fill=LIGHT, bold=(c0 == 1))
+        ws.merge_cells(start_row=4, start_column=c0, end_row=4, end_column=c1)
+    C(ws, 4, 4, 1, "0", fill=YEL)
+    C(ws, 4, 8, f"={SUM_CELLS['skill']}", PCT)
+    C(ws, 4, 11, f"={SUM_CELLS['rmse']}", F2)
+    T(ws, 4, 12, "← 기준은 요약 시트를 따라감", 9, color="555555")
+    K, SK, RM = "$D$4", "$H$4", "$K$4"
+    mk = lambda r, k: f"({db('B')}=$A{r})*({db('E')}={k})*(MONTH({db('F')})=$B{r})"
+    bad = PatternFill("solid", fgColor=FAIL_FILL)
+
+    # ① 월별 성능
+    r = 6
+    T(ws, r, 1, "① 월별 예보 ETo 성능 (선행일 k, S3, mm/일)", 11, True, GREEN); r += 1
+    for j, h in enumerate(["구분", "월", "n", "관측 평균", "예보 평균", "MBE", "RMSE", "상대 RMSE", "지속성 RMSE",
+                           "개선율(지속성)", "7일평균 RMSE", "개선율(7일평균)"], 1):
+        H(ws, r, j, h, size=9)
+    r += 1
+    rows1 = {}
+    for rn in runs:
+        for m in months:
+            mask = mk(r, K)
+            z = lambda expr, rr=r: f'=IF($C{rr}=0,"-",{expr})'
+            C(ws, r, 1, rn); C(ws, r, 2, m)
+            C(ws, r, 3, f"=SUMPRODUCT({mask})", "0")
+            C(ws, r, 4, z(f"SUMPRODUCT({mask}*{db('AA')})/$C{r}"), F2)
+            C(ws, r, 5, z(f"SUMPRODUCT({mask}*{db('Y')})/$C{r}"), F2)
+            C(ws, r, 6, z(f"SUMPRODUCT({mask}*{db('AD')})/$C{r}"), F2)
+            C(ws, r, 7, z(f"SQRT(SUMPRODUCT({mask}*{db('AD')}^2)/$C{r})"), F2)
+            C(ws, r, 8, z(f"G{r}/D{r}"), PCT)
+            C(ws, r, 9, z(f"SQRT(SUMPRODUCT({mask}*{db('AF')}^2)/$C{r})"), F2)
+            C(ws, r, 10, z(f"1-G{r}/I{r}"), PCT)
+            C(ws, r, 11, z(f"SQRT(SUMPRODUCT({mask}*{db('AG')}^2)/$C{r})"), F2)
+            C(ws, r, 12, z(f"1-G{r}/K{r}"), PCT)
+            rows1[(rn, m)] = r
+            r += 1
+    a0, a1 = min(rows1.values()), max(rows1.values())
+    ws.conditional_formatting.add(f"G{a0}:G{a1}", FormulaRule(formula=[f"AND({K}=1,ISNUMBER(G{a0}),G{a0}>{RM})"], fill=bad))
+    ws.conditional_formatting.add(f"J{a0}:J{a1}", FormulaRule(formula=[f"AND({K}>=1,{K}<=3,ISNUMBER(J{a0}),J{a0}<{SK})"],
+                                                              fill=bad))
+    T(ws, r, 1, "붉은 칸: 선행일 1의 RMSE가 기준보다 크거나, 선행일 1~3의 개선율이 기준보다 작은 달. "
+                "상대 RMSE = RMSE ÷ 관측 평균 (ETo가 큰 여름은 절대 오차도 커지므로 함께 봄).", 9, color="555555")
+    chart_at = 7
+    r += 2
+
+    # ② 달마다 H2 기준 적용 (참고)
+    T(ws, r, 1, "② 달마다 H2 기준을 적용하면 (참고 — H2 판정은 전체 기간)", 11, True, GREEN); r += 1
+    for j, h in enumerate(["구분", "월", "D+1 n", "개선율 D+1", "개선율 D+2", "개선율 D+3", "최소 개선율", "D+1 RMSE",
+                           "개선율 기준", "D+1 기준", "결과"], 1):
+        H(ws, r, j, h, size=9)
+    r += 1
+    b0 = r
+    for rn in runs:
+        for m in months:
+            C(ws, r, 1, rn); C(ws, r, 2, m)
+            C(ws, r, 3, f"=SUMPRODUCT({mk(r, 1)})", "0")
+            for j, k in zip((4, 5, 6), (1, 2, 3)):
+                a = mk(r, k)
+                C(ws, r, j, f'=IF(SUMPRODUCT({a})=0,"-",1-SQRT(SUMPRODUCT({a}*{db("AD")}^2)/SUMPRODUCT({a}*{db("AF")}^2)))', PCT)
+            C(ws, r, 7, f'=IF(COUNT(D{r}:F{r})=0,"-",MIN(D{r}:F{r}))', PCT)
+            C(ws, r, 8, f'=IF(C{r}=0,"-",SQRT(SUMPRODUCT({mk(r, 1)}*{db("AD")}^2)/C{r}))', F2)
+            C(ws, r, 9, f'=IF(ISNUMBER(G{r}),IF(G{r}>={SK},"충족","미달"),"-")')
+            C(ws, r, 10, f'=IF(ISNUMBER(H{r}),IF(H{r}<={RM},"충족","미달"),"-")')
+            C(ws, r, 11, f'=IF(AND(I{r}="충족",J{r}="충족"),"충족","미달")', bold=True)
+            r += 1
+    rng_v = f"I{b0}:K{r - 1}"
+    ws.conditional_formatting.add(rng_v, FormulaRule(formula=[f'I{b0}="충족"'], fill=PatternFill("solid", fgColor=PASS_FILL)))
+    ws.conditional_formatting.add(rng_v, FormulaRule(formula=[f'I{b0}="미달"'], fill=bad))
+    r += 1
+
+    # ③ 월별 입력 편향
+    T(ws, r, 1, "③ 월별 입력 편향 (예보 − 관측, 선행일 k)", 11, True, GREEN); r += 1
+    for j, h in enumerate(["구분", "월", "n", "Tmax (℃)", "Tmin (℃)", "일교차 (℃)", "ea (kPa)", "u10 (m/s)",
+                           "Rs S3 (MJ/m²/일)", "예보 강수일 비율", "관측 강수일 비율", "오보 (일)", "놓침 (일)"], 1):
+        H(ws, r, j, h, size=9)
+    r += 1
+    for rn in runs:
+        for m in months:
+            mask = mk(r, K)
+            C(ws, r, 1, rn); C(ws, r, 2, m); C(ws, r, 3, f"=SUMPRODUCT({mask})", "0")
+            for j, col in zip(range(4, 10), ("AV", "AW", "AX", "AY", "AZ", "BA")):
+                C(ws, r, j, f'=IF($C{r}=0,"-",SUMPRODUCT({mask}*{db(col)})/$C{r})', F3 if col == "AY" else F2)
+            C(ws, r, 10, f'=IF($C{r}=0,"-",SUMPRODUCT({mask}*{db("O")})/$C{r})', PCT)
+            C(ws, r, 11, f'=IF($C{r}=0,"-",SUMPRODUCT({mask}*{db("AU")})/$C{r})', PCT)
+            C(ws, r, 12, f'=SUMPRODUCT({mask}*({db("BB")}="오보"))', "0")
+            C(ws, r, 13, f'=SUMPRODUCT({mask}*({db("BB")}="놓침"))', "0")
+            r += 1
+    r += 1
+    for n in ["편향 = 예보 − 관측 (+면 예보가 큼). Rs는 예보 입력(일교차·강수유무)으로 추정한 값(S3) − 관측 Rs.",
+              "Rs계수 시트의 월별 표(관측 입력으로 추정한 Rs의 편향)와 비교하면, 예보 입력 탓(일교차·강수유무 예보오차)과 "
+              "추정식 자체 탓을 나눠 볼 수 있습니다.",
+              "예보 강수일 비율이 관측보다 크면(오보가 많으면) 강수유무 보정(계수 c < 0) 때문에 Rs와 ETo가 과소추정됩니다.",
+              "예보 일교차가 관측보다 좁으면(일교차 편향 −) Rs가 작게 추정됩니다. 예보 최고·최저기온은 ASOS 일 최고·최저(0~24시)와 "
+              "정의가 달라(낮최고 09~18시, 아침최저 03~09시) 일교차가 좁게 나오는 경향이 있습니다."]:
+        T(ws, r, 1, n, 9, color="555555"); r += 1
+
+    # 차트: 월별 RMSE (선행일 k)
+    bar = BarChart(); bar.type = "col"; bar.grouping = "clustered"
+    bar.title = "월별 RMSE (선행일 k, ETo mm/일)"; bar.y_axis.title = "RMSE (mm/일)"
+    for rn, color in zip(runs, (BLUE, BROWN)):
+        rr = [rows1[(rn, m)] for m in months]
+        bar.add_data(Reference(ws, min_col=7, min_row=rr[0], max_row=rr[-1]), titles_from_data=False)
+        s = bar.series[-1]; s.tx = SeriesLabel(v=rn)
+        s.graphicalProperties.solidFill = color; s.graphicalProperties.line.solidFill = color
+    rr = [rows1[(runs[0], m)] for m in months]
+    bar.set_categories(Reference(ws, min_col=2, min_row=rr[0], max_row=rr[-1]))
+    bar.height = 7.5; bar.width = 15; bar.legend.position = "b"; bar.y_axis.majorGridlines = None
+    ws.add_chart(bar, f"N{chart_at}")
+    widths(ws, {"A": 8, "B": 6, "C": 7, **{CL(j): 11 for j in range(4, 14)}})
+    ws.freeze_panes = "A5"
+    return ws
+
+
 # ── 차트자료 ─────────────────────────────────────────────────────────────
 def sheet_chartdata(wb, df, db_rows, obs_rows):
     ws = wb.create_sheet("차트자료")
@@ -577,17 +769,24 @@ def sheet_summary(wb, res, db_rows, c3_rows, groups, chart_rows):
     T(ws, 1, 1, f"단기예보 기반 ETo·ETc 예측 검증 (H2) — ASOS {res['stn']} · {res['meta']['settings'].get('작물', '사과')}", 14, True, GREEN)
     T(ws, 2, 1, f"02-Cycle 3단계 · 작성 {dt.date.today():%Y-%m-%d} · cropwater_fcst.py verify · 근거 docs/THEORY.md 9장, 판정 기록 docs/VALIDATION.md", 9, color="555555")
     iss = res["arch"].issues
-    n_m = int((df.run_name == "아침").sum() / max(df[df.run_name == "아침"].lead_day.nunique(), 1))
-    n_e = int((df.run_name == "저녁").sum() / max(df[df.run_name == "저녁"].lead_day.nunique(), 1))
+    n_m, n_e = (int(df[df.run_name == n].run.nunique()) for n in ("아침", "저녁"))
+    gaps = run_gaps(res.get("skipped_runs", []))
+    dropped = res.get("dropped")
     info = [
         ("예보 자료", f"기상자료개방포털 과거 단기예보(격자 {', '.join(chk['location'])}) · TMX·TMN·TMP·REH·WSD·PCP · "
-                    f"발표 {chk['issues']}회 ({iss[0]:%Y-%m-%d %H}시 ~ {iss[-1]:%Y-%m-%d %H}시), 누락 {len(chk['missing_issues'])}회"),
+                    f"{iss[0]:%Y-%m-%d %H}시 ~ {iss[-1]:%Y-%m-%d %H}시 발표 중 6요소가 모두 있는 발표 {chk['issues']}회"
+                    f" (한 요소라도 빠진 발표 {len(chk['missing_issues'])}회)"),
         ("서비스 발표", f"아침 02시 {n_m}회 → 오늘~D+3 · 저녁 17시 {n_e}회 → 내일~D+4 (다른 발표는 이전 시각 채움에만 사용)"),
         ("대상일", f"{df.target.min():%Y-%m-%d} ~ {df.target.max():%Y-%m-%d}"),
         ("관측 기준", f"ASOS {res['stn']} 일자료 → FAO-56 PM ETo (관측 Rs, 01-Cycle 규칙과 동일, 차이 < 1e-12 mm)"),
         ("Rs 추정", f"식(50) + 강수유무 보정(S3), 계수 {res['coef'].get('source', '')} — Rs계수 시트"),
         ("작물계수", f"{res['meta']['settings'].get('작물', '')} 시나리오 {res['kp']['scenario']}, 생육 시작 {res['kp']['bud']} — 01-Cycle 워크북과 같은 Kc"),
     ]
+    if gaps or (dropped is not None and len(dropped)):
+        gtxt = ", ".join(f"{a:%m/%d %H}시~{b:%m/%d %H}시 {n}회" if n > 1 else f"{a:%m/%d %H}시" for a, b, n, _ in gaps)
+        reasons = dropped.drop_reason.value_counts().to_dict() if dropped is not None and len(dropped) else {}
+        info.append(("제외", (f"요소가 빠진 서비스 발표 {sum(g[2] for g in gaps)}회({gtxt})" if gaps else "제외 발표 없음")
+                     + ("; " + ", ".join(f"{k} {v}행" for k, v in reasons.items()) if reasons else "")))
     if res.get("compare"):
         info.append(("비교 격자", f"{', '.join(res['compare']['check']['location'])} — 같은 관측·계수·Kc로 계산해 격자비교 시트에 정리"))
     r = 4
@@ -603,6 +802,7 @@ def sheet_summary(wb, res, db_rows, c3_rows, groups, chart_rows):
     C(ws, r, 1, "D+1 RMSE ≤ (mm/일)", left=True, fill=LIGHT); C(ws, r, 2, 1.0, F2, fill=YEL)
     C(ws, r, 3, "두 발표 각각", left=True, color="555555"); ws.merge_cells(start_row=r, start_column=3, end_row=r, end_column=6)
     rmse_cell = f"$B${r}"; r += 2
+    SUM_CELLS.update(skill=f"요약!{skill_cell}", rmse=f"요약!{rmse_cell}")
     verdict_hdr = r
     for j, h in enumerate(["구분", "D+1~D+3 최소 개선율", "D+1 RMSE", "개선율 기준", "D+1 기준", "판정"], 1):
         H(ws, r, j, h)
@@ -683,9 +883,12 @@ def sheet_summary(wb, res, db_rows, c3_rows, groups, chart_rows):
     for txt in res.get("findings", []):
         lines.append(txt)
     for ln in lines:
-        T(ws, r, 1, ln, 10); ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=14); r += 1
-    # 차트 (주요 발견 아래)
-    r += 1
+        # 긴 해석 문장은 여러 행으로 나눔(병합 칸의 줄바꿈·행 높이는 엑셀과 LibreOffice가 다르게 그려 차트와 겹침)
+        for part in ([ln] if ln.startswith("=") else _wrap_text(ln, 160)):
+            T(ws, r, 1, part, 10); ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=14); r += 1
+    # 차트 (주요 발견 아래). LibreOffice는 글꼴에 맞춰 행 높이를 늘린 뒤에도 차트를 처음 위치에 두므로
+    # 위쪽 행 수의 5%만큼 빈 행을 더 둬 글과 겹치지 않게 한다(엑셀은 차트가 행을 따라 움직여 영향 없음)
+    r += 1 + max(2, -(-r // 20))
     bar = BarChart(); bar.type = "col"; bar.grouping = "clustered"
     bar.title = "선행시간별 RMSE (ETo, mm/일)"; bar.y_axis.title = "RMSE (mm/일)"
     cats = Reference(ws, min_col=1, min_row=rows_eto[0], max_row=rows_eto[-1])
@@ -740,6 +943,7 @@ def _metric_table(ws, r, hdr, groups, db, fcol, ocol, ecol, pcol, mcol):
 # ── 방법 ────────────────────────────────────────────────────────────────
 def sheet_method(wb, res):
     df, loc, sg = res["table"], res["check"]["location"], res.get("stn_grid")
+    bt = res.get("boot")
     if sg and loc == [sg]:
         grid_note = f"예보 격자 {sg} = ASOS {res['stn']} 관측소 격자. 5 km 격자 대표값과 지점 관측의 차이(대표성 오차)는 남음."
     else:
@@ -756,6 +960,7 @@ def sheet_method(wb, res):
         ("", "u2", "WSD 일평균(10 m) × 4.87/ln(67.8×10−5.42) = 0.748 × u10  [식47]"),
         ("", "강수", "PCP 일합계. 기준(설정, 1 mm) 이상이면 강수유무 1."),
         ("", "지나간 시각 채움", "포털 과거자료는 발표 6시간 뒤부터 들어 있음(02시 발표 → 08시부터). 발표 시점에 이미 지난 시각은 그 이전의 가장 최근 발표 값으로 채움 → 아침 D+0의 00~07시 = 전날 17·20·23시 발표. (API는 발표 1시간 뒤부터 제공되므로 운영에서는 00~02시만 채움)"),
+        ("", "결측", "값이 ±900 이상(예: −999.9)이면 결측. 6요소 중 하나라도 없는 서비스 발표는 통째로 제외(다른 발표로 대신하지 않음). 대상일 관측이 없는 행도 제외. 3일 누적은 첫 3개 대상일이 모두 있을 때만."),
         ("", "마지막 날", "아침 D+3·저녁 D+4는 00시(1시간) + 03~21시(3시간 간격) 8개 시각. 풍속·강수는 코드값 → WSD 1: 같은 발표 직전 정량일 평균(최대 3.9), 2: 6.5, 3: 11 m/s / PCP 1: 1.5, 2: 9, 3: 20 mm/h × 3시간."),
         ("예보 ETo", "PM", "FAO-56 식(6), G = 0. 기압은 식(7) 고도 추정. Ra·Rso는 지점 위도·고도로 계산."),
         ("", "Rs", "S3: Rs/Ra = a + b√(Tmax−Tmin) + c·강수유무, [0.05Ra, Rso]로 제한. 계수는 검증 연도와 겹치지 않는 해(2025)의 관측으로 결정. 비교용 S1: kRs 0.16."),
@@ -765,11 +970,19 @@ def sheet_method(wb, res):
         ("지표", "MBE·RMSE·R²", "오차 = 예보 − 관측. MBE +면 과대추정. R²는 예보·관측 상관계수의 제곱."),
         ("", "개선율", "1 − RMSE_예보 / RMSE_기준선. 0보다 크면 기준선보다 좋음."),
         ("", "3일 누적", "발표별 첫 3개 대상일 합계(아침 D+0~D+2, 저녁 D+1~D+3). FAO-56은 추정 Rs 기반 ETo를 여러 날 합계로 쓰도록 권고."),
+        ("", "월별", "대상일의 월로 나눈 지표(월별 시트, 수식). 달마다 H2 기준을 적용한 결과는 원인 진단용 참고이며, H2 판정은 전체 기간으로 함."),
+        ("", "불확실성", (f"{bt['block']}일 이동 블록 부트스트랩 {bt['n_boot']:,}회(오차분해 ④): 발표일을 {bt['block']}일 묶음으로 "
+                        "복원추출해 D+1 RMSE·최소 개선율의 90% 구간과 두 기준을 모두 충족한 비율을 구함. 예보 오차는 날씨가 며칠 "
+                        "이어져 서로 상관이 있으므로 하루 단위로 뽑지 않음. 교차검증한 보정(오차분해 ②)을 적용한 예보도 같은 방법으로 "
+                        "계산(탐색, 판정 미사용).") if bt else "계산하지 않음(분석 생략)"),
         ("판정", "H2", "두 발표 각각 D+1~D+3 개선율 ≥ 기준, D+1 RMSE ≤ 상한 (요약 시트 노란 칸). 아침 D+0·저녁 D+4는 참고."),
         ("한계", "격자", grid_note),
         ("", "기간", f"대상일 {df.target.min():%Y-%m-%d} ~ {df.target.max():%Y-%m-%d}. "
-                    + ("생육기(4~9월) 전체를 포함합니다." if set(range(4, 10)) <= set(df.target.dt.month)
+                    + ("생육기(4~9월) 전체를 포함합니다(자료 공백으로 뺀 발표·행은 요약 시트 '제외' 행)."
+                       if set(range(4, 10)) <= set(df.target.dt.month)
                        else "생육기(4~9월) 중 일부만 포함 → 나머지 달의 예보 자료로 확인.")),
+        ("", "연도·지점", f"{'·'.join(str(y) for y in sorted(set(df.target.dt.year)))}년, ASOS {res['stn']} 한 지점의 결과. "
+                          "다른 해·다른 지점에서의 성능은 검정하지 않음."),
         ("", "강수", "예보 강수는 강수유무(Rs 보정)에만 쓰였고, 유효강수·물수지 영향은 다음 단계(G4)에서 검증."),
     ]
     H(ws, 3, 1, "구분"); H(ws, 3, 2, "항목"); H(ws, 3, 3, "내용")
@@ -798,22 +1011,23 @@ def build_verify_workbook(res, out):
     _, obs_rows2 = sheet_obs(wb, obs)
     assert obs_rows2 == obs_rows
     _, db_rows, run_ids = sheet_daily(wb, df, obs_rows)
-    _, c3_rows = sheet_cum3(wb, df, db_rows, run_ids)
+    _, c3_rows = sheet_cum3(wb, df, db_rows, run_ids, res.get("cum3_runs"))
     sheet_diag(wb, db_rows, groups)
     sheet_attr(wb, res)
     if res.get("grid_cmp"):
         sheet_grid_compare(wb, res)
     _, chart_rows = sheet_chartdata(wb, df, db_rows, obs_rows)
     sheet_summary(wb, res, db_rows, c3_rows, groups, chart_rows)
+    sheet_month(wb, df, db_rows)            # 요약 시트의 합격 기준 셀을 참조하므로 요약 다음에 만든다
     sheet_method(wb, res)
-    order = ["요약", "일별비교", "3일누적", "입력진단", "오차분해"] + (["격자비교"] if res.get("grid_cmp") else []) + \
+    order = ["요약", "일별비교", "3일누적", "월별", "입력진단", "오차분해"] + (["격자비교"] if res.get("grid_cmp") else []) + \
             ["Rs계수", "관측", "설정", "방법", "차트자료"]
     wb._sheets = [wb[n] for n in order]
-    for n in ("요약", "Rs계수", "설정", "방법", "오차분해", "입력진단", "3일누적", "격자비교"):
+    for n in ("요약", "Rs계수", "설정", "방법", "오차분해", "입력진단", "3일누적", "월별", "격자비교"):
         if n in wb.sheetnames:
             wb[n].sheet_view.showGridLines = False
     wb["요약"].sheet_properties.tabColor = GREEN
-    for n in [x for x in ("요약", "Rs계수", "입력진단", "오차분해", "격자비교", "방법", "설정") if x in wb.sheetnames]:
+    for n in [x for x in ("요약", "월별", "Rs계수", "입력진단", "오차분해", "격자비교", "방법", "설정") if x in wb.sheetnames]:
         w = wb[n]; w.page_setup.orientation = "landscape"; w.page_setup.fitToWidth = 1; w.page_setup.fitToHeight = 0
         w.sheet_properties.pageSetUpPr.fitToPage = True
     return safe_save(wb, out)

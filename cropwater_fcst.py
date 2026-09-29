@@ -39,6 +39,9 @@ KRS_FAO = 0.16              # FAO-56 식(50) 내륙 기본값
 H2_SKILL_MIN = 0.30         # H2: 지속성 대비 RMSE 개선율 기준 (VALIDATION.md, 2026-09-29 확정)
 H2_RMSE_D1_MAX = 1.0        # H2: D+1 RMSE 상한 (mm/일)
 H2_LEADS = (1, 2, 3)        # H2 판정 선행일
+H2_BOOT_N = 2000            # 판정 불확실성: 부트스트랩 반복 수
+H2_BOOT_BLOCK = 7           # 블록 길이(일). 날씨가 며칠 이어져 예보 오차끼리 상관이 있으므로 하루 단위로 뽑지 않음
+H2_BOOT_SEED = 20260929     # 재현용 난수 시드
 # 대표 ASOS 지점과 단기예보 격자(nx_ny) — ARCHITECTURE.md 7장 표
 STATIONS = {"101": ("춘천", "73_134"), "216": ("태백", "95_119"), "119": ("수원", "60_120"),
             "131": ("청주", "68_107"), "129": ("서산", "52_109"), "146": ("전주", "63_89"),
@@ -104,6 +107,30 @@ def forecast_table(st, obs, lat, elev, coef, kp):
     return df
 
 
+
+def split_verifiable(df):
+    """채점할 수 있는 행과 뺀 행. 예보 입력·대상일 관측·기준선 관측이 모두 있어야 한다.
+       반환: (검증 표, 뺀 행 + drop_reason)"""
+    no_in = df[["Tmax", "Tmin", "ea", "u10", "rain"]].isna().any(axis=1)
+    no_obs = df["ETo_obs"].isna()
+    no_base = df[["ETo_pers", "ETo_7d"]].isna().any(axis=1)
+    reason = np.select([no_in, no_obs, no_base], ["예보 입력 결측", "대상일 관측 없음", "기준선 관측 없음"], "")
+    d = df.assign(drop_reason=reason)
+    return d[reason == ""].drop(columns="drop_reason").reset_index(drop=True), d[reason != ""].reset_index(drop=True)
+
+
+def run_gaps(runs, max_gap_h=15):
+    """제외된 서비스 발표 [(구분, 발표시각, 빠진 요소)] → 연속 구간 목록 [(첫 발표, 끝 발표, 횟수, 빠진 요소)]"""
+    ts = sorted(runs, key=lambda x: x[1])
+    out = []
+    for name, t, miss in ts:
+        if out and (t - out[-1][1]) <= pd.Timedelta(hours=max_gap_h):
+            a, _, n, m = out[-1]
+            out[-1] = (a, t, n + 1, sorted(set(m) | set(miss)))
+        else:
+            out.append((t, t, 1, sorted(miss)))
+    return out
+
 def _stats(f, o):
     m = ~(pd.isna(f) | pd.isna(o))
     f, o = np.asarray(f, float)[m], np.asarray(o, float)[m]
@@ -131,15 +158,17 @@ def lead_metrics(df, fcol="ETo_S3", ocol="ETo_obs", pcol="ETo_pers", mcol="ETo_7
 
 
 def cum3(df, fcol="ETo_S3", ocol="ETo_obs", pcol="ETo_pers"):
-    """발표별 처음 3개 대상일(아침 D0~D+2, 저녁 D+1~D+3) 누적"""
+    """발표별 처음 3개 대상일(아침 D0~D+2, 저녁 D+1~D+3) 누적. 세 날이 모두 채점 가능할 때만 포함"""
     rows = []
-    for (rn, run), g in df.sort_values("lead_day").groupby(["run_name", "run"], sort=False):
-        g3 = g.head(3)
+    first = {n: min(ls) for n, (_, ls) in SERVICE_RUNS.items()}
+    for (rn, run), g in df.groupby(["run_name", "run"], sort=False):
+        k0 = first.get(rn, int(g.lead_day.min()))
+        g3 = g[g.lead_day.isin([k0, k0 + 1, k0 + 2])]
         if len(g3) < 3 or g3[[fcol, ocol, pcol]].isna().any().any():
             continue
-        rows.append(dict(run_name=rn, run=run, leads=f"D+{g3.lead_day.min()}~D+{g3.lead_day.max()}",
+        rows.append(dict(run_name=rn, run=run, leads=f"D+{k0}~D+{k0 + 2}",
                          fcst=g3[fcol].sum(), obs=g3[ocol].sum(), pers=g3[pcol].sum()))
-    c = pd.DataFrame(rows)
+    c = pd.DataFrame(rows, columns=["run_name", "run", "leads", "fcst", "obs", "pers"])
     res = []
     for rn, g in c.groupby("run_name", sort=False):
         s, sp = _stats(g.fcst, g.obs), _stats(g.pers, g.obs)
@@ -160,6 +189,74 @@ def h2_verdict(met, skill_min=H2_SKILL_MIN, rmse_d1_max=H2_RMSE_D1_MAX, leads=H2
                        min_skill=float(min(g.loc[k, "skill_pers"] for k in leads if k in g.index)),
                        rmse_d1=float(g.loc[1, "RMSE"]) if 1 in g.index else float("nan"))
     return out
+
+
+# ── 월별 성능과 판정 불확실성 ────────────────────────────────────────────
+def month_metrics(df, leads=H2_LEADS, fcol="ETo_S3"):
+    """발표 × 선행일 × 대상일 월별 예보 ETo 지표와 입력 편향(예보 − 관측). 엑셀 월별 시트와 같은 정의"""
+    rows = []
+    d = df[df.lead_day.isin(leads)]
+    for (rn, k, m), g in d.groupby(["run_name", "lead_day", d.target.dt.month], sort=False):
+        s, sp = _stats(g[fcol], g.ETo_obs), _stats(g.ETo_pers, g.ETo_obs)
+        rows.append(dict(run_name=rn, lead_day=int(k), month=int(m), n=s["n"], obs_mean=s["obs_mean"],
+                         fcst_mean=s["fcst_mean"], MBE=s["MBE"], RMSE=s["RMSE"], rel_RMSE=s["RMSE"] / s["obs_mean"],
+                         RMSE_pers=sp["RMSE"], skill_pers=1 - s["RMSE"] / sp["RMSE"],
+                         dTmax=(g.Tmax - g.Tmax_obs).mean(), dTmin=(g.Tmin - g.Tmin_obs).mean(),
+                         ddT=((g.Tmax - g.Tmin) - (g.Tmax_obs - g.Tmin_obs)).mean(), dea=(g.ea - g.ea_obs).mean(),
+                         du10=(g.u10 - g.u10_obs).mean(), dRs=(g.Rs_S3 - g.Rs_obs).mean(),
+                         rain_fcst=g.rain_flag.mean(), rain_obs=g.flag_obs.mean(),
+                         false_alarm=int(((g.rain_flag == 1) & (g.flag_obs == 0)).sum()),
+                         miss=int(((g.rain_flag == 0) & (g.flag_obs == 1)).sum())))
+    order = {n: i for i, n in enumerate(SERVICE_RUNS)}
+    return pd.DataFrame(rows).sort_values(["run_name", "lead_day", "month"], ignore_index=True,
+                                          key=lambda s: s.map(order) if s.name == "run_name" else s)
+
+
+def month_verdict(mm, skill_min=H2_SKILL_MIN, rmse_d1_max=H2_RMSE_D1_MAX):
+    """참고: 달마다 H2 기준을 적용한 결과(원인 진단용). H2 판정 자체는 전체 기간으로 한다"""
+    rows = []
+    for (rn, m), g in mm.groupby(["run_name", "month"], sort=False):
+        g = g.set_index("lead_day")
+        ms, r1 = float(g.skill_pers.min()), float(g.loc[1, "RMSE"]) if 1 in g.index else float("nan")
+        rows.append(dict(run_name=rn, month=int(m), n_d1=int(g.loc[1, "n"]) if 1 in g.index else 0,
+                         min_skill=ms, rmse_d1=r1, pass_=bool(ms >= skill_min and r1 <= rmse_d1_max)))
+    return pd.DataFrame(rows)
+
+
+def bootstrap_h2(df, n_boot=H2_BOOT_N, block=H2_BOOT_BLOCK, seed=H2_BOOT_SEED, skill_min=H2_SKILL_MIN,
+                 rmse_d1_max=H2_RMSE_D1_MAX, leads=H2_LEADS, fcol="ETo_S3"):
+    """H2 판정의 표본 불확실성 — 이동 블록 부트스트랩.
+       발표일을 block일 묶음으로 복원추출한다. 같은 날의 아침·저녁 발표와 선행일을 함께 뽑아 서로의 상관을 보존.
+       반환: runs={구분: dict(rmse_d1, min_skill = (5%, 50%, 95%) 백분위, pass_frac = 두 기준을 모두 충족한 비율)},
+             pass_all(모든 발표 동시 충족 비율), n_boot, block, n_days, seed"""
+    ks = sorted(set(leads) | {1})
+    d = df[df.lead_day.isin(ks)]
+    d = d.assign(e2=(d[fcol] - d.ETo_obs) ** 2, p2=(d.ETo_pers - d.ETo_obs) ** 2)
+    runs = list(dict.fromkeys(d.run_name))
+    days = np.array(sorted(d.run_date.unique()))
+    pos = {t: i for i, t in enumerate(days)}
+    ri, ki = {r: i for i, r in enumerate(runs)}, {k: i for i, k in enumerate(ks)}
+    N = len(days)
+    E, P, Cn = (np.zeros((N, len(runs), len(ks))) for _ in range(3))
+    for (t, rn, k), g in d.groupby(["run_date", "run_name", "lead_day"]):
+        i, j, l = pos[t], ri[rn], ki[k]
+        E[i, j, l], P[i, j, l], Cn[i, j, l] = g.e2.sum(), g.p2.sum(), len(g)
+    rng = np.random.default_rng(seed)
+    nb = -(-N // block)
+    starts = rng.integers(0, max(N - block + 1, 1), size=(n_boot, nb))
+    idx = np.minimum((starts[:, :, None] + np.arange(block)).reshape(n_boot, -1)[:, :N], N - 1)
+    Es, Ps, Cs = E[idx].sum(axis=1), P[idx].sum(axis=1), Cn[idx].sum(axis=1)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        rmse, skill = np.sqrt(Es / Cs), 1 - np.sqrt(Es / Ps)
+    q = lambda a: tuple(float(x) for x in np.nanpercentile(a, [5, 50, 95]))
+    out, ok_all = {}, np.ones(n_boot, bool)
+    for rn, j in ri.items():
+        r1 = rmse[:, j, ki[1]]
+        ms = np.nanmin(skill[:, j, [ki[k] for k in leads]], axis=1)
+        ok = (r1 <= rmse_d1_max) & (ms >= skill_min)
+        ok_all &= ok
+        out[rn] = dict(rmse_d1=q(r1), min_skill=q(ms), pass_frac=float(ok.mean()))
+    return dict(runs=out, pass_all=float(ok_all.mean()), n_boot=n_boot, block=block, n_days=N, seed=seed)
 
 
 # ── 입력 진단과 오차 분해 ────────────────────────────────────────────────
@@ -216,10 +313,20 @@ def error_attribution(df, lat, elev, coef):
     return pd.DataFrame(rows), list(variants)
 
 
+def fit_rs_forecast(t):
+    """Rs 식(S3) 계수를 예보 입력(예보 일교차·예보 강수유무)과 관측 Rs로 최소제곱 적합 → (a, b, c).
+       rs_model.fit과 같은 식이지만 입력이 관측이 아니라 예보다(예보 입력의 계통오차까지 흡수)."""
+    t = t[(t.Tmax > t.Tmin) & t.Rs_obs.notna()]
+    X = np.column_stack([np.ones(len(t)), np.sqrt(t.Tmax - t.Tmin).values, t.rain_flag.values.astype(float)])
+    return np.linalg.lstsq(X, (t.Rs_obs / t.Ra).values, rcond=None)[0]
+
+
 def bias_correction_cv(df, lat, elev, coef):
-    """탐색: 지점 편향 보정의 효과를 월 단위 교차검증으로 평가(보정값은 다른 달 자료로 추정).
-       B1 기온(Tmax·Tmin) 가산 보정, B2 기온 + 풍속 가산 보정, B3 ETo 비율 보정. 발표 × 선행일별로 추정.
-       반환: (지표표 long: method·발표·선행일, 전체기간 입력 편향 표, 교차검증 묶음 목록)"""
+    """탐색: 지점 보정의 효과를 월 단위 교차검증으로 평가(보정값은 다른 달 자료로 추정).
+       B1 기온(Tmax·Tmin) 가산 보정, B2 기온 + 풍속 가산 보정, B3 ETo 비율 보정,
+       B4 Rs 계수 재보정(예보 입력 → 관측 Rs). 발표 × 선행일별로 추정.
+       반환: (지표표 long: method·발표·선행일, 전체기간 입력 편향 표, 교차검증 묶음 목록,
+              행별 보정 ETo 표(열 B1~B4, df와 같은 index))"""
     d = df.copy()
     per = d.target.dt.to_period("M")
     days_last = d.loc[per == per.max(), "target"].dt.normalize().nunique()
@@ -227,7 +334,7 @@ def bias_correction_cv(df, lat, elev, coef):
     d["fold"] = per.where(~((per == per.max()) & (days_last < 10)), per.max() - 1).astype(str)
     if d.fold.nunique() < 2:
         raise ValueError("편향 보정 교차검증에는 대상일이 2개 달 이상 필요합니다")
-    cols = {"B1": np.full(len(d), np.nan), "B2": np.full(len(d), np.nan), "B3": np.full(len(d), np.nan)}
+    cols = {b: np.full(len(d), np.nan) for b in ("B1", "B2", "B3", "B4")}
     pos = {ix: i for i, ix in enumerate(d.index)}
     for f in sorted(d.fold.unique()):
         tr, te = d[d.fold != f], d[d.fold == f]
@@ -242,7 +349,11 @@ def bias_correction_cv(df, lat, elev, coef):
             cols["B1"][idx] = eto_series(tx, tn, g.ea, g.u10, rs, g.target, lat, elev)
             cols["B2"][idx] = eto_series(tx, tn, g.ea, (g.u10 - du).clip(lower=0.1), rs, g.target, lat, elev)
             cols["B3"][idx] = g.ETo_S3 * ratio
-    names = {"ETo_S3": "보정 없음(원자료)", "B1": "기온 보정", "B2": "기온+풍속 보정", "B3": "ETo 비율 보정"}
+            a4, b4, c4 = fit_rs_forecast(t)
+            rs4 = rs_s3(g.Tmax, g.Tmin, g.rain_flag, g.Ra.values, g.Rso.values, a4, b4, c4)
+            cols["B4"][idx] = eto_series(g.Tmax, g.Tmin, g.ea, g.u10, rs4, g.target, lat, elev)
+    names = {"ETo_S3": "보정 없음(원자료)", "B1": "기온 보정", "B2": "기온+풍속 보정", "B3": "ETo 비율 보정",
+             "B4": "Rs 계수 재보정(예보 입력)"}
     out = []
     for c, name in names.items():
         if c != "ETo_S3":
@@ -254,7 +365,7 @@ def bias_correction_cv(df, lat, elev, coef):
         out.append(m)
     bias = (df.assign(dTmax=df.Tmax - df.Tmax_obs, dTmin=df.Tmin - df.Tmin_obs, du10=df.u10 - df.u10_obs)
               .groupby(["run_name", "lead_day"], sort=False)[["dTmax", "dTmin", "du10"]].mean().reset_index())
-    return pd.concat(out, ignore_index=True), bias, sorted(d.fold.unique())
+    return pd.concat(out, ignore_index=True), bias, sorted(d.fold.unique()), d[list(cols)]
 
 
 # ── H1 (관측 입력 + Rs 추정) — G2 기록용 ──────────────────────────────────
@@ -273,6 +384,15 @@ def h1_table(obs, lat, elev, coef, start, end, anem=10.0):
 
 
 # ── 실행 ────────────────────────────────────────────────────────────────
+def coef_file(path):
+    """계수 파일 경로. 상대경로가 현재 폴더에 없으면 이 스크립트 폴더의 같은 이름 파일을 쓴다
+       (다른 폴더에서 실행해도 저장소의 rs_coef.csv를 찾도록)"""
+    if os.path.isabs(path) or os.path.exists(path):
+        return path
+    alt = os.path.join(os.path.dirname(os.path.abspath(__file__)), path)
+    return alt if os.path.exists(alt) else path
+
+
 def load_obs(path):
     obs, meta = load_station_workbook(path)
     obs = add_eto_obs(obs, meta["lat"], meta["elev"], meta.get("anem", 10.0))
@@ -286,21 +406,29 @@ def run_verify(fcst_paths, obs_path, stn, coef_path="rs_coef.csv", analysis=True
     rep = check_archive(arch)
     st = service_table(arch)
     obs, meta = load_obs(obs_path)
-    coef = load_coef(stn, coef_path)
+    coef = load_coef(stn, coef_file(coef_path))
     kp = kc_params(meta["settings"])
-    df = forecast_table(st, obs, meta["lat"], meta["elev"], coef, kp)
+    df, dropped = split_verifiable(forecast_table(st, obs, meta["lat"], meta["elev"], coef, kp))
     name, grid = STATIONS.get(str(stn), ("", ""))
+    c3, _ = cum3(df)
     res = dict(stn=str(stn), stn_name=name, stn_grid=grid, arch=arch, check=rep, table=df, obs=obs, meta=meta,
-               coef=coef, kp=kp,
+               coef=coef, kp=kp, dropped=dropped, skipped_runs=list(getattr(arch, "skipped_runs", [])),
+               cum3_runs=set(zip(c3.run_name, c3.run)) if len(c3) else set(),
                h1_start=pd.Timestamp(kp["bud"]) if kp.get("bud") else df.target.min(), h1_end=obs.date.max())
     if compare_paths:
         arch2 = load_archive(compare_paths)
-        df2 = forecast_table(service_table(arch2), obs, meta["lat"], meta["elev"], coef, kp)
+        df2, _ = split_verifiable(forecast_table(service_table(arch2), obs, meta["lat"], meta["elev"], coef, kp))
         res["compare"] = dict(check=check_archive(arch2), table=df2)
         res["grid_cmp"] = grid_comparison(df, df2)
     if analysis:
         res["attr"], res["attr_names"] = error_attribution(df, meta["lat"], meta["elev"], coef)
-        res["bc"], res["bc_bias"], res["bc_folds"] = bias_correction_cv(df, meta["lat"], meta["elev"], coef)
+        res["bc"], res["bc_bias"], res["bc_folds"], bc_rows = bias_correction_cv(df, meta["lat"], meta["elev"], coef)
+        res["month"] = month_metrics(df)
+        res["month_verdict"] = month_verdict(res["month"])
+        res["boot"] = bootstrap_h2(df)
+        # 탐색: 교차검증한 보정을 적용했을 때 판정 여유가 얼마나 늘어나는지 (G4 보정 채택 판단 근거)
+        res["boot_bc"] = {name: bootstrap_h2(df.assign(**{c: bc_rows[c]}), fcol=c)
+                          for c, name in (("B2", "기온+풍속 보정"), ("B3", "ETo 비율 보정"))}
         res["findings"] = findings(res)
     return res
 
@@ -325,22 +453,69 @@ def grid_comparison(df, df2):
 
 
 def findings(res):
-    """요약 시트의 해석 문장(④~). 수식으로 연결할 수 없는 Python 분석 결과와 자료 조건 경고"""
+    """요약 시트의 해석 문장(④~). 수식으로 연결할 수 없는 Python 분석 결과와 자료 조건 경고.
+       순서: 판정 불확실성 → 월별 약점 → 오차 원인 → 보정 탐색 → 격자·자료 조건"""
     out, df = [], res["table"]
+    bt = res.get("boot")
+    if bt:
+        rng_ = ", ".join(f"{rn} {v['rmse_d1'][0]:.2f}~{v['rmse_d1'][2]:.2f}" for rn, v in bt["runs"].items())
+        frac = ", ".join(f"{rn} {v['pass_frac']:.0%}" for rn, v in bt["runs"].items())
+        txt = (f"판정 불확실성({bt['block']}일 블록 부트스트랩 {bt['n_boot']:,}회): D+1 RMSE 90% 구간 {rng_} mm/일, "
+               f"두 기준을 모두 충족한 비율 {frac}")
+        weak = [rn for rn, v in bt["runs"].items() if v["pass_frac"] < 0.9]
+        if weak:
+            txt += f" → {'·'.join(weak)} 발표는 기준과의 여유가 표본 변동보다 작음"
+            bb = res.get("boot_bc") or {}
+            if bb:
+                name = max(bb, key=lambda n: min(bb[n]["runs"][w]["pass_frac"] for w in weak))
+                txt += (f". 교차검증한 '{name}'을 적용하면 "
+                        + ", ".join(f"{w} {bb[name]['runs'][w]['pass_frac']:.0%}" for w in weak))
+        out.append(txt + " (오차분해 ④)")
+    mm = res.get("month")
+    if mm is not None and len(mm):
+        m1 = mm[(mm.lead_day == 1) & (mm.n >= 10)]
+        bad = m1[m1.RMSE > H2_RMSE_D1_MAX]
+        if len(bad):
+            parts = []
+            for rn, g in bad.groupby("run_name", sort=False):
+                w = g.loc[g.RMSE.idxmax()]
+                parts.append(f"{rn} {'·'.join(str(int(x)) for x in g.month)}월(최대 {int(w.month)}월 {w.RMSE:.2f})")
+            b = m1[m1.month.isin(sorted(set(bad.month)))]
+            txt = f"월별(D+1): RMSE가 기준 {H2_RMSE_D1_MAX:.1f}을 넘는 달 — {', '.join(parts)}. "
+            if b.dRs.max() < 0:
+                txt += f"이 달들의 예보 Rs는 관측보다 {-b.dRs.max():.1f}~{-b.dRs.min():.1f} MJ/m²/일 작음"
+            else:
+                txt += f"이 달들의 예보 Rs 편향 {b.dRs.min():+.1f}~{b.dRs.max():+.1f} MJ/m²/일"
+            over = b.assign(ex=b.rain_fcst - b.rain_obs).groupby("month").ex.mean()
+            if over.max() >= 0.15:
+                mo = int(over.idxmax()); x = b[b.month == mo]
+                txt += (f". {mo}월은 예보상 비 오는 날이 {x.rain_fcst.mean():.0%}(실제 {x.rain_obs.mean():.0%})로 많아 "
+                        f"강수유무 보정이 Rs를 더 낮춤")
+            out.append(txt + " (월별 시트)")
+        else:
+            out.append(f"월별(D+1): 모든 달에서 RMSE ≤ {H2_RMSE_D1_MAX:.1f} mm/일 (월별 시트)")
     att, names = res["attr"], res["attr_names"]
-    # 번호(④~)는 마지막에 순서대로 붙임
     d1 = att[att.lead_day == 1]
     base = d1[names[0]].mean()
     cand = {n: base - d1[n].mean() for n in names[1:5]}
     top = max(cand, key=cand.get)
     struct = d1[names[5]].mean()
-    out.append(f"오차 분해(D+1, 두 발표 평균 RMSE {base:.2f}): '{top}' 교체 시 {cand[top]:.2f} mm/일 감소로 가장 큼. "
-               f"예보가 완벽해도 남는 구조오차(Rs 추정)는 {struct:.2f} mm/일 (오차분해 ①)")
+    txt = (f"오차 분해(D+1, 두 발표 평균 RMSE {base:.2f}): 예보 입력 중에는 '{top}' 교체 시 {cand[top]:.2f} mm/일 감소로 "
+           f"가장 큼. 예보가 완벽해도 남는 구조오차(Rs 추정)는 {struct:.2f} mm/일")
+    if len(names) > 6:
+        rs_only = d1[names[6]].mean()
+        txt += f", 추정 Rs만 관측 Rs로 바꾸면 {rs_only:.2f} mm/일"
+        if base - rs_only > cand[top]:
+            txt += " → 일사 추정이 가장 큰 오차원"
+    out.append(txt + " (오차분해 ①)")
     bc = res["bc"]
-    raw = bc[(bc.method == "보정 없음(원자료)") & (bc.lead_day == 1)].RMSE.mean()
-    b2 = bc[(bc.method == "기온+풍속 보정") & (bc.lead_day == 1)].RMSE.mean()
-    out.append(f"탐색: 월 단위 교차검증한 기온+풍속 편향 보정은 D+1 RMSE를 {raw:.2f} → {b2:.2f} mm/일"
-               f"({(1 - b2 / raw):.0%} 감소), 편향을 거의 0으로 줄임 (오차분해 ②). 채택 여부는 다음 게이트에서 결정")
+    r1 = lambda m: bc[(bc.method == m) & (bc.lead_day == 1)].RMSE.mean()
+    raw = r1("보정 없음(원자료)")
+    vals = {m: r1(m) for m in dict.fromkeys(bc.method) if m != "보정 없음(원자료)"}
+    best = min(vals, key=vals.get)
+    out.append(f"보정 탐색(월 단위 교차검증, D+1 두 발표 평균 RMSE {raw:.2f}): "
+               + ", ".join(f"{m} {v:.2f}" for m, v in vals.items())
+               + f" mm/일 — 가장 좋은 방법은 '{best}'({1 - vals[best] / raw:.0%} 감소). 채택 여부는 G4에서 결정 (오차분해 ②)")
     loc = res["check"]["location"]
     if res.get("grid_cmp"):
         gc, loc2 = res["grid_cmp"], res["compare"]["check"]["location"]
@@ -353,11 +528,18 @@ def findings(res):
     if res.get("stn_grid") and loc != [res["stn_grid"]]:
         out.append(f"주의: 예보 격자 {', '.join(loc)}가 ASOS {res['stn']} 격자({res['stn_grid']})와 다릅니다. "
                    f"대표성 오차(특히 기온 편향)가 달라질 수 있어 {res['stn_grid']} 자료로 재확인이 필요합니다")
+    gaps = run_gaps(res.get("skipped_runs", []))
+    if gaps:
+        txt = ", ".join(f"{a:%m/%d %H}시~{b:%m/%d %H}시({n}회)" if n > 1 else f"{a:%m/%d %H}시" for a, b, n, _ in gaps)
+        dr = res.get("dropped")
+        nd = 0 if dr is None else len(dr)
+        out.append(f"자료 공백: 요소가 빠진 서비스 발표 {sum(g[2] for g in gaps)}회 제외({txt}). "
+                   f"관측이 없는 대상일 등 {nd}행 제외 (방법 시트)")
     months = sorted(df.target.dt.month.unique())
     if not set(range(4, 10)) <= set(months):
         out.append(f"기간: 대상일 {df.target.min():%Y-%m-%d}~{df.target.max():%Y-%m-%d}만 포함한 "
                    f"중간 결과입니다. 생육기(4~9월) 전체 판정에는 나머지 달의 예보 자료가 필요합니다")
-    return [f"{'④⑤⑥⑦⑧⑨'[i]} {t}" for i, t in enumerate(out)]
+    return [f"{'④⑤⑥⑦⑧⑨⑩⑪'[i]} {t}" for i, t in enumerate(out)]
 
 
 def main(argv=None):
@@ -388,6 +570,8 @@ def main(argv=None):
     print(f"[예보] 격자 {res['check']['location']}, 발표 {res['check'].get('issues')}회, "
           f"누락 {len(res['check'].get('missing_issues', []))}회")
     print(f"[Rs 계수] {res['coef']['source']}")
+    if res["coef"].get("a") is None:
+        print(f"[경고] {a.coef}에 지점 {a.stn}의 S3 계수가 없어 FAO-56 기본값(S1)으로 계산했습니다. calib를 먼저 실행하세요")
     print(met.round(3).to_string(index=False))
     _, h1 = h1_table(res["obs"], res["meta"]["lat"], res["meta"]["elev"], res["coef"], res["h1_start"], res["h1_end"],
                      res["meta"].get("anem", 10.0))
@@ -395,6 +579,17 @@ def main(argv=None):
         print(f"[H1 {m}] {res['h1_start']:%Y-%m-%d}~{res['h1_end']:%Y-%m-%d} RMSE {s['RMSE']:.3f}, 합계오차 {s['SUMERR']:+.1%}")
     for rn, v in h2_verdict(met).items():
         print(f"[H2] {rn}: {'통과' if v['pass_'] else '미달'} (최소 개선율 {v['min_skill']:.0%}, D+1 RMSE {v['rmse_d1']:.2f})")
+    if res.get("month") is not None:
+        m1 = res["month"][res["month"].lead_day == 1]
+        print("[월별 D+1 RMSE]")
+        print(m1.pivot(index="run_name", columns="month", values="RMSE").round(2).to_string())
+    if res.get("boot"):
+        b = res["boot"]
+        for rn, v in b["runs"].items():
+            print(f"[불확실성] {rn}: D+1 RMSE 90% {v['rmse_d1'][0]:.2f}~{v['rmse_d1'][2]:.2f}, "
+                  f"최소 개선율 90% {v['min_skill'][0]:.0%}~{v['min_skill'][2]:.0%}, 기준 충족 {v['pass_frac']:.0%}")
+    for ln in res.get("findings", []):
+        print(ln)
     grid = "-".join(res["check"]["location"]) or "grid"
     out = a.out or f"output/fcst_verify({a.stn})_{grid}_{df.target.min():%Y%m%d}_{df.target.max():%Y%m%d}.xlsx"
     from fcst_report import build_verify_workbook
