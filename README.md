@@ -44,7 +44,7 @@
 | **다지점 일괄 분석** | 30개 이상 지점 동시 계산 및 관수 필요 달력(히트맵) 시각화 |
 | **지점 메타 자동화** | 기상청 API 연동, 위도·고도·풍속계 높이 자동 수집 및 로컬 캐싱 |
 | **51개 작물 라이브러리** | FAO-56 표준 파라미터(Kc·Zr·p) 내장 (`crops_library.csv`) |
-| **단기예보 ETo·ETc 예측** (02-Cycle, H2 검증 완료 → 물수지 전망 설계) | 기상청 단기예보(아침 02시 → 오늘~D+3, 저녁 17시 → 내일~D+4)로 ETo·ETc 예측, 일사는 식(50)+강수유무로 추정, 과거 예보로 선행시간별·월별 검증 |
+| **단기예보 ETo·ETc 예측** (02-Cycle, H2 검증 완료 → 물수지 전망 설계) | 기상청 단기예보(아침 02시 → 오늘~D+3, 저녁 17시 → 내일~D+4)로 ETo·ETc 예측, 일사는 기온교차·강수유무·하늘상태로 추정(S4), 과거 예보로 선행시간별·월별 검증 |
 
 ---
 
@@ -126,12 +126,16 @@ python cropwater_multi.py --stns 101,119,131,146,156,136,216 --start 20260401 --
 python cropwater_fcst.py calib --obs output/eto101_apple_20250101_20251231.xlsx --stn 101
 
 # H2 검증: 기상자료개방포털 과거 단기예보 CSV 폴더 + 검증 연도 워크북 → 검증 엑셀
+#   하늘상태(SKY) CSV가 함께 있으면 주 방법이 S4(하늘상태 반영)가 됨
 python cropwater_fcst.py verify --fcst data/fcst_101 --obs output/eto101_apple_20260101_20260928.xlsx --stn 101
+
+# 운영용 S4 계수: 하늘상태 포함 과거 예보 + 관측 → rs_sky_coef.csv (선행일별)
+python cropwater_fcst.py calib-sky --fcst data/fcst_101 --obs output/eto101_apple_20260101_20260928.xlsx --stn 101
 ```
 
 | 파라미터 | 설명 |
 | :--- | :--- |
-| `--fcst` | 과거 단기예보 CSV 폴더 또는 파일들 (TMX·TMN·TMP·REH·WSD·PCP) |
+| `--fcst` | 과거 단기예보 CSV 폴더 또는 파일들 (필수 TMX·TMN·TMP·REH·WSD·PCP, 선택 SKY·POP. 여러 달을 한 파일로 받아도 됨) |
 | `--obs` | `cropwater_station.py` 출력 워크북 (관측 기준값·Kc 설정). 첫 발표 7일 전부터 포함 |
 | `--stn` | ASOS 지점 번호 (rs_coef.csv 행 선택) |
 | `--coef` / `--out` | 계수 파일(기본 `rs_coef.csv`, 현재 폴더에 없으면 스크립트 폴더) / 출력 파일명 (기본 `output/fcst_verify(지점)_격자_시작_끝.xlsx`) |
@@ -139,7 +143,9 @@ python cropwater_fcst.py verify --fcst data/fcst_101 --obs output/eto101_apple_2
 
 > 가설·합격 기준·게이트 판정은 [docs/VALIDATION.md](docs/VALIDATION.md), 이론은 [THEORY.md 9장](docs/THEORY.md)에 있습니다.
 >
-> 2026년 생육기(4~9월, ASOS 101 춘천·사과) 검증 결과: H2 기준 충족 — D+1 RMSE 아침 0.97·저녁 0.86 mm/일, 지속성 대비 43~50% 개선. 6~8월은 D+1 RMSE 1.0~1.2로 약함(일사 추정 과소).
+> 2026년 ASOS 101 춘천·사과 검증 결과: H2 기준 충족.
+> - S3(기온교차 + 강수유무), 생육기 4~9월: D+1 RMSE 아침 0.97·저녁 0.86 mm/일, 지속성 대비 43~50% 개선
+> - S4(하늘상태 반영), 대상일 4/2~9/19: D+1 RMSE 아침 0.93·저녁 0.83 mm/일, 지속성 대비 44~53% 개선. 8월이 크게 좋아졌고 7월(장마)은 여전히 약함
 
 ---
 
@@ -177,18 +183,18 @@ python cropwater_fcst.py verify --fcst data/fcst_101 --obs output/eto101_apple_2
 | **관수필요_달력** | Dr 히트맵 (흰→연녹→연노→진적) + Dr 선형 차트 |
 | **설명** | 계산 방법·파라미터 |
 
-### cropwater_fcst.py verify (11시트, --compare 시 12시트)
+### cropwater_fcst.py verify (11시트 + 하늘상태가 있으면 SKY계수, --compare면 격자비교)
 
 | 시트 | 내용 |
 | :--- | :--- |
-| **요약** | H2 합격 기준(노란 셀)·판정, 선행시간별 ETo·ETc 지표, 3일 누적, 주요 발견, 차트 |
+| **요약** | H2 합격 기준(노란 셀)·판정, 선행시간별 ETo·ETc 지표, Rs 방법 비교(S4일 때), 3일 누적, 주요 발견, 차트 |
 | **일별비교** | 발표 × 대상일 예보 입력·Rs·PM ETo·기준선·ETc·입력 오차 (라이브 수식) |
 | **3일누적** | 발표별 첫 3일 합 오차 |
 | **월별** | 월별 성능, 달마다 기준 적용(참고), 월별 입력 편향 (라이브 수식, 선행일 선택) |
 | **입력진단** | 입력 편향·강수 적중 |
 | **오차분해** | 입력 교체 오차 분해, 보정 탐색, 판정 불확실성(블록 부트스트랩) (Python 계산값) |
 | **격자비교** (선택) | 두 격자 예보의 성능·입력 편향·직접 차이 (Python 계산값) |
-| **Rs계수 / 관측 / 설정** | Rs 계수·H1 재검증 / ASOS 관측 ETo·Kc / 지점·예보·Kc 설정 |
+| **Rs계수 / SKY계수 / 관측 / 설정** | S3 계수·H1 재검증 / S4 교차검증·운영 계수(하늘상태가 있을 때) / ASOS 관측 ETo·Kc / 지점·예보·Kc 설정 |
 | **방법 / 차트자료** | 정의·규칙·한계 / 차트 원본 |
 
 📖 자세한 해석 방법 → [docs/RESULTS_GUIDE.md](docs/RESULTS_GUIDE.md)
@@ -229,15 +235,16 @@ cropwater/
 ├── cropwater_station.py        ← 단일 지점 분석 → 6시트 Excel
 ├── cropwater_multi.py          ← 다지점 비교 → 히트맵 + 차트
 │
-├── cropwater_fcst.py           ← (02-Cycle) 단기예보 ETo·ETc 예측 검증 CLI: calib / verify
+├── cropwater_fcst.py           ← (02-Cycle) 단기예보 ETo·ETc 예측 검증 CLI: calib / calib-sky / verify
 ├── fcst_archive.py             ← 과거 단기예보 CSV 파싱 → 발표별 일 입력
-├── rs_model.py                 ← 일사량(Rs) 추정: 식(50) + 강수유무 보정, 계수 적합
+├── rs_model.py                 ← 일사량(Rs) 추정: S3 식(50) + 강수유무, S4 + 하늘상태 구름 비율, 계수 적합
 ├── obs_daily.py                ← cropwater_station 워크북 → 관측 ETo·Kc
-├── fcst_report.py              ← 검증 엑셀 (11시트, 라이브 수식)
+├── fcst_report.py              ← 검증 엑셀 (11~13시트, 라이브 수식)
 │
 ├── crops_library.csv           ← 51개 작물 Kc·Zr·p (FAO-56 Table 12·22)
 ├── stations_backup.csv         ← ASOS 지점 메타 캐시
-├── rs_coef.csv                 ← Rs 추정 계수 (FAO 기본값 + 지점 보정값)
+├── rs_coef.csv                 ← Rs 추정 계수 S3 (FAO 기본값 + 지점 보정값)
+├── rs_sky_coef.csv             ← Rs 추정 계수 S4 (지점 × 선행일, calib-sky)
 │
 ├── output/                     ← 분석 결과물 저장 폴더 (.gitignore로 xlsx 제외)
 │   └── .gitkeep

@@ -6,7 +6,10 @@ cropwater_fcst.py — 기상청 단기예보 기반 ETo·ETc 예측과 검증 (0
 [하는 일]
   1) 과거 단기예보(포털 CSV)를 서비스 발표(아침 02시 → 오늘~D+3, 저녁 17시 → 내일~D+4)별 일 입력으로 집계
      (fcst_archive.py)
-  2) 예보 ETo = FAO-56 PM [식6]. 예보에 없는 Rs는 식(50)+강수유무 보정(rs_model.py, rs_coef.csv)
+  2) 예보 ETo = FAO-56 PM [식6]. 예보에 없는 Rs는 추정한다(rs_model.py)
+     - S4(주 방법, 하늘상태 예보가 있을 때): 식(50)형 + 강수유무 + 낮 시간 구름많음·흐림 비율, 선행일별 계수
+       검증에서는 월 단위 교차검증 계수(대상월을 뺀 나머지 달로 맞춤), 운영 계수는 rs_sky_coef.csv
+     - S3(비교, 하늘상태가 없을 때 주 방법): 식(50)+강수유무 보정, 다른 해 관측으로 정한 계수(rs_coef.csv)
   3) 예보 ETc = Kc × 예보 ETo  (Kc는 01-Cycle 워크북 설정 시트와 같은 값)
   4) ASOS 관측 ETo(01-Cycle 규칙)와 비교: 선행시간별 RMSE·MBE·R², 지속성·7일평균 기준선, 3일 누적
   5) 검증 엑셀(라이브 수식) 출력
@@ -14,11 +17,14 @@ cropwater_fcst.py — 기상청 단기예보 기반 ETo·ETc 예측과 검증 (0
 [실행]
   # Rs 계수 보정 (검증 연도와 다른 해의 관측으로)
   python cropwater_fcst.py calib --obs output/eto101_apple_20250101_20251231.xlsx --stn 101
-  # H2 검증 엑셀
+  # H2 검증 엑셀 (하늘상태·강수확률 CSV를 같은 폴더에 넣으면 S4로 검증)
   python cropwater_fcst.py verify --fcst data/fcst_101 --obs output/eto101_apple_20260101_20260928.xlsx --stn 101
+  # 운영용 S4 계수(선행일별) — 한 생육기 전체의 예보·관측으로 맞춰 rs_sky_coef.csv에 기록
+  python cropwater_fcst.py calib-sky --fcst data/fcst_101 --obs output/eto101_apple_20260101_20260928.xlsx --stn 101
 
 [입력]
-  --fcst : 기상자료개방포털 '단기예보(격자)' CSV 폴더(또는 파일들). 필수 요소 TMX·TMN·TMP·REH·WSD·PCP
+  --fcst : 기상자료개방포털 '단기예보(격자)' CSV 폴더(또는 파일들). 필수 요소 TMX·TMN·TMP·REH·WSD·PCP,
+           선택 요소 SKY(하늘상태)·POP(강수확률)
   --obs  : 01-Cycle cropwater_station.py 출력 워크북(원데이터·설정 시트). 검증 기간 + 7일 전부터 포함
   rs_coef.csv : 지점별 Rs 계수(없으면 FAO-56 kRs 0.16)
 
@@ -32,7 +38,7 @@ import pandas as pd
 from fao56_core import eto_penman_monteith, wind_2m
 from fcst_archive import RAIN_FLAG_MM, SERVICE_RUNS, check_archive, load_archive, service_table
 from obs_daily import add_eto_obs, kc_params, kc_series, load_station_workbook
-from rs_model import fit, load_coef, ra_rso, rs_s1, rs_s3, save_coef
+from rs_model import S4_NAMES, fit, fit_s4, load_coef, ra_rso, rs_s1, rs_s3, rs_s4, save_coef, save_sky_coef
 
 FCST_ANEM = 10.0            # 단기예보 풍속(WSD) 기준 높이 (m)
 KRS_FAO = 0.16              # FAO-56 식(50) 내륙 기본값
@@ -47,6 +53,10 @@ STATIONS = {"101": ("춘천", "73_134"), "216": ("태백", "95_119"), "119": ("�
             "131": ("청주", "68_107"), "129": ("서산", "52_109"), "146": ("전주", "63_89"),
             "156": ("광주", "59_75"), "136": ("안동", "90_106"), "192": ("진주", "79_75"),
             "189": ("서귀포", "53_32")}
+# 관측소 경도(°E) — 하늘상태를 낮 시간 일사 비중으로 가중할 때 태양시 보정에만 씀(0.1° 차이 = 0.4분)
+STATION_LON = {"101": 127.7357, "216": 128.9893, "119": 126.9830, "131": 127.4407, "129": 126.4939,
+               "146": 127.1172, "156": 126.8916, "136": 128.7073, "192": 128.0400, "189": 126.5653}
+S4_FEATS = ("Tmax", "Tmin", "rain_flag", "sky_cloudy", "sky_overcast", "Ra", "Rso")
 
 
 def pressure_from_elev(elev):
@@ -77,11 +87,59 @@ def rs_estimate(tmax, tmin, flag, dates, lat, elev, coef, method="S3"):
 
 
 # ── 예보 ETo·ETc와 기준선 ────────────────────────────────────────────────
+def month_folds(target):
+    """교차검증 묶음 = 대상일의 달. 마지막 달 대상일이 10일 미만이면(예: 7/1~7/4) 앞 달과 한 묶음"""
+    t = pd.to_datetime(pd.Series(target))
+    per = t.dt.to_period("M")
+    days_last = t[per == per.max()].dt.normalize().nunique()
+    return per.where(~((per == per.max()) & (days_last < 10)), per.max() - 1).astype(str)
+
+
+def s4_cv(df, exclude=()):
+    """S4 계수의 월 단위 교차검증(선행일별).
+       각 행에는 그 행의 묶음(대상월)과 exclude 묶음을 뺀 나머지 행으로 맞춘 같은 선행일의 계수를 준다.
+       반환: (행별 계수 n×5 배열 — 없으면 NaN, 계수표 DataFrame[fold, lead_day, n, a~e])"""
+    fold = month_folds(df.target).values
+    feat = df[list(S4_FEATS)].notna().all(axis=1).values
+    fit_ok = feat & df["Rs_obs"].notna().values
+    lead = df["lead_day"].values
+    co = np.full((len(df), len(S4_NAMES)), np.nan)
+    rows = []
+    for f in sorted(set(fold[feat])):
+        for k in sorted(set(lead[feat & (fold == f)])):
+            tr = fit_ok & (lead == k) & (fold != f) & ~np.isin(fold, list(exclude))
+            if tr.sum() < 20:
+                continue
+            t = df[tr]
+            c = fit_s4(t.Tmax, t.Tmin, t.rain_flag, t.sky_cloudy, t.sky_overcast, t.Ra, t.Rs_obs)
+            co[feat & (fold == f) & (lead == k)] = c
+            rows.append(dict(fold=f, lead_day=int(k), n=int(tr.sum()), **dict(zip(S4_NAMES, c))))
+    return co, pd.DataFrame(rows, columns=["fold", "lead_day", "n", *S4_NAMES])
+
+
+def s4_fit_all(df):
+    """운영용 S4 계수: 자료 전체로 선행일별 적합 → DataFrame[lead_day, a~e, n, fit_start, fit_end, rmse_rs]"""
+    ok = df[list(S4_FEATS)].notna().all(axis=1) & df["Rs_obs"].notna()
+    rows = []
+    for k, t in df[ok].groupby("lead_day"):
+        c = fit_s4(t.Tmax, t.Tmin, t.rain_flag, t.sky_cloudy, t.sky_overcast, t.Ra, t.Rs_obs)
+        est = rs_s4(t.Tmax, t.Tmin, t.rain_flag, t.sky_cloudy, t.sky_overcast, t.Ra, t.Rso, c)
+        rows.append(dict(lead_day=int(k), **dict(zip(S4_NAMES, c)), n=len(t),
+                         fit_start=str(t.target.min().date()), fit_end=str(t.target.max().date()),
+                         rmse_rs=float(np.sqrt(np.mean((est - t.Rs_obs.values) ** 2)))))
+    return pd.DataFrame(rows)
+
+
 def forecast_table(st, obs, lat, elev, coef, kp):
-    """서비스 표(fcst_archive.service_table) + 관측 → 예보 ETo(S3·S1), 관측·기준선, Kc·ETc"""
+    """서비스 표(fcst_archive.service_table) + 관측 → 예보 ETo(S4·S3·S1), 관측·기준선, Kc·ETc.
+       주 방법(★): 하늘상태가 있으면 S4, 없으면 S3 → 열 Rs_main·ETo_main·ETc_main.
+       S4 교차검증 계수표는 df.attrs["s4_table"]에 남긴다."""
     df = st.copy()
     df["target"] = pd.to_datetime(df["target"])
     df["run_date"] = df["run"].dt.normalize()
+    for c in ("rain_flag", "sky_cloudy", "sky_overcast", "pop", "pop_max"):
+        if c in df:
+            df[c] = pd.to_numeric(df[c])
     rs3, ra, rso = rs_estimate(df.Tmax, df.Tmin, df.rain_flag, df.target, lat, elev, coef, "S3")
     rs1, _, _ = rs_estimate(df.Tmax, df.Tmin, df.rain_flag, df.target, lat, elev, coef, "S1")
     df["Ra"], df["Rso"], df["Rs_S3"], df["Rs_S1"] = ra, rso, rs3, rs1
@@ -94,12 +152,23 @@ def forecast_table(st, obs, lat, elev, coef, kp):
                      ("u10", "u10_obs"), ("Rs", "Rs_obs"), ("rain", "rain_obs"), ("pa", "pa_obs")):
         df[c] = look(c_obs, df.target)
     df["flag_obs"] = (df["rain_obs"] >= RAIN_FLAG_MM).astype(int)
+    methods = ["S3", "S1"]
+    if "sky_cloudy" in df and df["sky_cloudy"].notna().any():
+        co, tab = s4_cv(df)
+        for j, n in enumerate(S4_NAMES):
+            df[f"s4_{n}"] = co[:, j]
+        df["Rs_S4"] = rs_s4(df.Tmax, df.Tmin, df.rain_flag, df.sky_cloudy, df.sky_overcast, df.Ra, df.Rso, co)
+        df["ETo_S4"] = eto_series(df.Tmax, df.Tmin, df.ea, df.u10, df.Rs_S4, df.target, lat, elev)
+        df.attrs["s4_table"] = tab
+        methods.insert(0, "S4")
+    main = methods[0]
+    df["Rs_main"], df["ETo_main"] = df[f"Rs_{main}"], df[f"ETo_{main}"]
     # 기준선: 발표일 전날(가장 최근의 완결된 관측일) 값, 최근 7일 평균
     df["ETo_pers"] = look("ETo_obs", df.run_date - pd.Timedelta(days=1))
     roll7 = o["ETo_obs"].rolling(7, min_periods=7).mean()
     df["ETo_7d"] = roll7.reindex(pd.DatetimeIndex(df.run_date - pd.Timedelta(days=1))).values
     df["Kc"] = kc_series(df.target, kp)
-    for c in ("S3", "S1"):
+    for c in methods + ["main"]:
         df[f"ETc_{c}"] = df["Kc"] * df[f"ETo_{c}"]
     df["ETc_obs"] = df["Kc"] * df["ETo_obs"]
     df["ETc_pers"] = df["Kc"] * df["ETo_pers"]
@@ -107,16 +176,24 @@ def forecast_table(st, obs, lat, elev, coef, kp):
     return df
 
 
+def main_method(df):
+    """주 방법 이름: 하늘상태 S4 열이 있으면 S4, 아니면 S3"""
+    return "S4" if "ETo_S4" in df.columns else "S3"
+
 
 def split_verifiable(df):
-    """채점할 수 있는 행과 뺀 행. 예보 입력·대상일 관측·기준선 관측이 모두 있어야 한다.
+    """채점할 수 있는 행과 뺀 행. 예보 입력(주 방법에 필요한 하늘상태 포함)·대상일 관측·기준선 관측이 모두 있어야 한다.
        반환: (검증 표, 뺀 행 + drop_reason)"""
     no_in = df[["Tmax", "Tmin", "ea", "u10", "rain"]].isna().any(axis=1)
+    no_sky = (~no_in) & df["ETo_main"].isna() if "ETo_main" in df else pd.Series(False, index=df.index)
     no_obs = df["ETo_obs"].isna()
     no_base = df[["ETo_pers", "ETo_7d"]].isna().any(axis=1)
-    reason = np.select([no_in, no_obs, no_base], ["예보 입력 결측", "대상일 관측 없음", "기준선 관측 없음"], "")
+    reason = np.select([no_in, no_sky, no_obs, no_base],
+                       ["예보 입력 결측", "하늘상태 없음", "대상일 관측 없음", "기준선 관측 없음"], "")
     d = df.assign(drop_reason=reason)
-    return d[reason == ""].drop(columns="drop_reason").reset_index(drop=True), d[reason != ""].reset_index(drop=True)
+    keep = d[reason == ""].drop(columns="drop_reason").reset_index(drop=True)
+    keep.attrs = dict(df.attrs)
+    return keep, d[reason != ""].reset_index(drop=True)
 
 
 def run_gaps(runs, max_gap_h=15):
@@ -140,7 +217,7 @@ def _stats(f, o):
                 RMSE=math.sqrt((e ** 2).mean()), R2=r ** 2)
 
 
-def lead_metrics(df, fcol="ETo_S3", ocol="ETo_obs", pcol="ETo_pers", mcol="ETo_7d"):
+def lead_metrics(df, fcol="ETo_main", ocol="ETo_obs", pcol="ETo_pers", mcol="ETo_7d"):
     """발표(아침·저녁) × 선행일별 지표와 기준선 대비 개선율"""
     rows = []
     for (rn, k), g in df.groupby(["run_name", "lead_day"], sort=False):
@@ -157,7 +234,7 @@ def lead_metrics(df, fcol="ETo_S3", ocol="ETo_obs", pcol="ETo_pers", mcol="ETo_7
                            ignore_index=True)
 
 
-def cum3(df, fcol="ETo_S3", ocol="ETo_obs", pcol="ETo_pers"):
+def cum3(df, fcol="ETo_main", ocol="ETo_obs", pcol="ETo_pers"):
     """발표별 처음 3개 대상일(아침 D0~D+2, 저녁 D+1~D+3) 누적. 세 날이 모두 채점 가능할 때만 포함"""
     rows = []
     first = {n: min(ls) for n, (_, ls) in SERVICE_RUNS.items()}
@@ -192,7 +269,7 @@ def h2_verdict(met, skill_min=H2_SKILL_MIN, rmse_d1_max=H2_RMSE_D1_MAX, leads=H2
 
 
 # ── 월별 성능과 판정 불확실성 ────────────────────────────────────────────
-def month_metrics(df, leads=H2_LEADS, fcol="ETo_S3"):
+def month_metrics(df, leads=H2_LEADS, fcol="ETo_main"):
     """발표 × 선행일 × 대상일 월별 예보 ETo 지표와 입력 편향(예보 − 관측). 엑셀 월별 시트와 같은 정의"""
     rows = []
     d = df[df.lead_day.isin(leads)]
@@ -203,7 +280,7 @@ def month_metrics(df, leads=H2_LEADS, fcol="ETo_S3"):
                          RMSE_pers=sp["RMSE"], skill_pers=1 - s["RMSE"] / sp["RMSE"],
                          dTmax=(g.Tmax - g.Tmax_obs).mean(), dTmin=(g.Tmin - g.Tmin_obs).mean(),
                          ddT=((g.Tmax - g.Tmin) - (g.Tmax_obs - g.Tmin_obs)).mean(), dea=(g.ea - g.ea_obs).mean(),
-                         du10=(g.u10 - g.u10_obs).mean(), dRs=(g.Rs_S3 - g.Rs_obs).mean(),
+                         du10=(g.u10 - g.u10_obs).mean(), dRs=(g.Rs_main - g.Rs_obs).mean(),
                          rain_fcst=g.rain_flag.mean(), rain_obs=g.flag_obs.mean(),
                          false_alarm=int(((g.rain_flag == 1) & (g.flag_obs == 0)).sum()),
                          miss=int(((g.rain_flag == 0) & (g.flag_obs == 1)).sum())))
@@ -224,7 +301,7 @@ def month_verdict(mm, skill_min=H2_SKILL_MIN, rmse_d1_max=H2_RMSE_D1_MAX):
 
 
 def bootstrap_h2(df, n_boot=H2_BOOT_N, block=H2_BOOT_BLOCK, seed=H2_BOOT_SEED, skill_min=H2_SKILL_MIN,
-                 rmse_d1_max=H2_RMSE_D1_MAX, leads=H2_LEADS, fcol="ETo_S3"):
+                 rmse_d1_max=H2_RMSE_D1_MAX, leads=H2_LEADS, fcol="ETo_main"):
     """H2 판정의 표본 불확실성 — 이동 블록 부트스트랩.
        발표일을 block일 묶음으로 복원추출한다. 같은 날의 아침·저녁 발표와 선행일을 함께 뽑아 서로의 상관을 보존.
        반환: runs={구분: dict(rmse_d1, min_skill = (5%, 50%, 95%) 백분위, pass_frac = 두 기준을 모두 충족한 비율)},
@@ -267,7 +344,7 @@ def input_diagnostics(df):
         r = dict(run_name=rn, lead_day=int(k), n=len(g))
         for name, f, o in (("Tmax", g.Tmax, g.Tmax_obs), ("Tmin", g.Tmin, g.Tmin_obs),
                            ("dT", g.Tmax - g.Tmin, g.Tmax_obs - g.Tmin_obs), ("ea", g.ea, g.ea_obs),
-                           ("u10", g.u10, g.u10_obs), ("Rs", g.Rs_S3, g.Rs_obs)):
+                           ("u10", g.u10, g.u10_obs), ("Rs", g.Rs_main, g.Rs_obs)):
             s = _stats(f, o)
             r[f"{name}_MBE"], r[f"{name}_RMSE"] = s["MBE"], s["RMSE"]
         hit = int(((g.rain_flag == 1) & (g.flag_obs == 1)).sum())
@@ -282,17 +359,28 @@ def input_diagnostics(df):
     return pd.DataFrame(rows)
 
 
+def main_rs(df, lat, elev, coef, tmax=None, tmin=None, flag=None, s4coef=None):
+    """주 방법의 Rs를 (바꾼) 입력으로 다시 계산. S4는 행별 계수(s4_a~e 열 또는 s4coef), S3는 rs_coef 계수"""
+    tmax = df.Tmax if tmax is None else tmax
+    tmin = df.Tmin if tmin is None else tmin
+    flag = df.rain_flag if flag is None else flag
+    if main_method(df) == "S4":
+        co = df[[f"s4_{n}" for n in S4_NAMES]].values if s4coef is None else s4coef
+        return rs_s4(tmax, tmin, flag, df.sky_cloudy, df.sky_overcast, df.Ra, df.Rso, co)
+    return rs_estimate(tmax, tmin, flag, df.target, lat, elev, coef, "S3")[0]
+
+
 def error_attribution(df, lat, elev, coef):
-    """예보 입력을 하나씩 관측값으로 바꿨을 때의 ETo RMSE (S3). 줄어든 만큼이 그 입력 예보오차의 몫.
-       '관측 입력 전부'는 구조오차(Rs 추정)만 남은 상태 = H1 조건(기압만 고도 추정)."""
+    """예보 입력을 하나씩 관측값으로 바꿨을 때의 ETo RMSE (주 방법). 줄어든 만큼이 그 입력 예보오차의 몫.
+       '관측 입력 전부'는 Rs 추정만 남은 상태(S3면 H1 조건과 같음. S4는 하늘상태 관측이 없어 예보 그대로)."""
+    all_obs = "관측 입력 전부 (Rs만 추정)" if main_method(df) == "S3" else "관측 입력 전부 (Rs만 추정, 하늘상태는 예보)"
     variants = {
         "예보 입력 그대로": dict(),
         "기온 → 관측": dict(Tmax="Tmax_obs", Tmin="Tmin_obs"),
         "습도(ea) → 관측": dict(ea="ea_obs"),
         "풍속 → 관측": dict(u10="u10_obs"),
         "강수유무 → 관측": dict(rain_flag="flag_obs"),
-        "관측 입력 전부 (Rs만 추정)": dict(Tmax="Tmax_obs", Tmin="Tmin_obs", ea="ea_obs", u10="u10_obs",
-                                     rain_flag="flag_obs"),
+        all_obs: dict(Tmax="Tmax_obs", Tmin="Tmin_obs", ea="ea_obs", u10="u10_obs", rain_flag="flag_obs"),
         "참고: Rs만 관측": dict(Rs="Rs_obs"),
     }
     res = {}
@@ -301,7 +389,7 @@ def error_attribution(df, lat, elev, coef):
         if "Rs" in rep:
             rs = df["Rs_obs"].values
         else:
-            rs, _, _ = rs_estimate(col("Tmax"), col("Tmin"), col("rain_flag"), df.target, lat, elev, coef, "S3")
+            rs = main_rs(df, lat, elev, coef, col("Tmax"), col("Tmin"), col("rain_flag"))
         res[name] = eto_series(col("Tmax"), col("Tmin"), col("ea"), col("u10"), rs, df.target, lat, elev)
     rows = []
     for (rn, k), idx in df.groupby(["run_name", "lead_day"], sort=False).groups.items():
@@ -322,41 +410,52 @@ def fit_rs_forecast(t):
 
 
 def bias_correction_cv(df, lat, elev, coef):
-    """탐색: 지점 보정의 효과를 월 단위 교차검증으로 평가(보정값은 다른 달 자료로 추정).
+    """탐색: 지점 보정의 효과를 월 단위 교차검증으로 평가(보정값은 다른 달 자료로 추정). 대상은 주 방법의 예보.
        B1 기온(Tmax·Tmin) 가산 보정, B2 기온 + 풍속 가산 보정, B3 ETo 비율 보정,
-       B4 Rs 계수 재보정(예보 입력 → 관측 Rs). 발표 × 선행일별로 추정.
+       B4 Rs 계수 재보정(예보 입력 → 관측 Rs; 주 방법이 S3일 때만. S4는 이미 예보 입력으로 맞춘 계수).
+       S4는 계수 자체가 교차검증 값이므로, B3 비율을 구하는 학습 행의 예보도 검증 달을 뺀 계수로 다시 계산한다(중첩 교차검증).
        반환: (지표표 long: method·발표·선행일, 전체기간 입력 편향 표, 교차검증 묶음 목록,
-              행별 보정 ETo 표(열 B1~B4, df와 같은 index))"""
+              행별 보정 ETo 표(열 B1~B3(B4), df와 같은 index))"""
     d = df.copy()
-    per = d.target.dt.to_period("M")
-    days_last = d.loc[per == per.max(), "target"].dt.normalize().nunique()
-    # 마지막 달 대상일이 10일 미만이면(예: 7/1~7/4) 앞 달과 한 묶음
-    d["fold"] = per.where(~((per == per.max()) & (days_last < 10)), per.max() - 1).astype(str)
+    main = main_method(d)
+    d["fold"] = month_folds(d.target).values
     if d.fold.nunique() < 2:
         raise ValueError("편향 보정 교차검증에는 대상일이 2개 달 이상 필요합니다")
-    cols = {b: np.full(len(d), np.nan) for b in ("B1", "B2", "B3", "B4")}
+    keys = ("B1", "B2", "B3") + (("B4",) if main == "S3" else ())
+    cols = {b: np.full(len(d), np.nan) for b in keys}
     pos = {ix: i for i, ix in enumerate(d.index)}
     for f in sorted(d.fold.unique()):
         tr, te = d[d.fold != f], d[d.fold == f]
+        base_tr = tr.ETo_main
+        if main == "S4":           # 학습 행의 S4 예보를 검증 달 f까지 뺀 계수로 다시 계산
+            co_f, _ = s4_cv(d, exclude=(f,))
+            rs_f = rs_s4(tr.Tmax, tr.Tmin, tr.rain_flag, tr.sky_cloudy, tr.sky_overcast, tr.Ra, tr.Rso,
+                         co_f[[pos[i] for i in tr.index]])
+            base_tr = pd.Series(eto_series(tr.Tmax, tr.Tmin, tr.ea, tr.u10, rs_f, tr.target, lat, elev), index=tr.index)
         for (rn, k), g in te.groupby(["run_name", "lead_day"]):
-            t = tr[(tr.run_name == rn) & (tr.lead_day == k)]
+            m = (tr.run_name == rn) & (tr.lead_day == k)
+            t = tr[m]
             dtx, dtn = (t.Tmax - t.Tmax_obs).mean(), (t.Tmin - t.Tmin_obs).mean()
             du = (t.u10 - t.u10_obs).mean()
-            ratio = t.ETo_obs.sum() / t.ETo_S3.sum()
+            ok = base_tr[m].notna() & t.ETo_obs.notna()
+            ratio = t.ETo_obs[ok].sum() / base_tr[m][ok].sum()
             tx, tn = g.Tmax - dtx, g.Tmin - dtn
-            rs, _, _ = rs_estimate(tx, tn, g.rain_flag, g.target, lat, elev, coef, "S3")
+            rs = main_rs(g, lat, elev, coef, tx, tn, g.rain_flag)
             idx = [pos[i] for i in g.index]
             cols["B1"][idx] = eto_series(tx, tn, g.ea, g.u10, rs, g.target, lat, elev)
             cols["B2"][idx] = eto_series(tx, tn, g.ea, (g.u10 - du).clip(lower=0.1), rs, g.target, lat, elev)
-            cols["B3"][idx] = g.ETo_S3 * ratio
-            a4, b4, c4 = fit_rs_forecast(t)
-            rs4 = rs_s3(g.Tmax, g.Tmin, g.rain_flag, g.Ra.values, g.Rso.values, a4, b4, c4)
-            cols["B4"][idx] = eto_series(g.Tmax, g.Tmin, g.ea, g.u10, rs4, g.target, lat, elev)
-    names = {"ETo_S3": "보정 없음(원자료)", "B1": "기온 보정", "B2": "기온+풍속 보정", "B3": "ETo 비율 보정",
+            cols["B3"][idx] = g.ETo_main * ratio
+            if "B4" in cols:
+                a4, b4, c4 = fit_rs_forecast(t)
+                rs4 = rs_s3(g.Tmax, g.Tmin, g.rain_flag, g.Ra.values, g.Rso.values, a4, b4, c4)
+                cols["B4"][idx] = eto_series(g.Tmax, g.Tmin, g.ea, g.u10, rs4, g.target, lat, elev)
+    names = {"ETo_main": "보정 없음(원자료)", "B1": "기온 보정", "B2": "기온+풍속 보정", "B3": "ETo 비율 보정",
              "B4": "Rs 계수 재보정(예보 입력)"}
     out = []
     for c, name in names.items():
-        if c != "ETo_S3":
+        if c != "ETo_main":
+            if c not in cols:
+                continue
             d[c] = cols[c]
         m = lead_metrics(d, c)
         m.insert(0, "method", name)
@@ -366,6 +465,12 @@ def bias_correction_cv(df, lat, elev, coef):
     bias = (df.assign(dTmax=df.Tmax - df.Tmax_obs, dTmin=df.Tmin - df.Tmin_obs, du10=df.u10 - df.u10_obs)
               .groupby(["run_name", "lead_day"], sort=False)[["dTmax", "dTmin", "du10"]].mean().reset_index())
     return pd.concat(out, ignore_index=True), bias, sorted(d.fold.unique()), d[list(cols)]
+
+
+def method_comparison(df, methods=None):
+    """같은 대상일에서 Rs 추정 방법별 예보 ETo 지표(발표 × 선행일) — 주 방법과 비교 방법의 차이를 본다"""
+    methods = methods or [m for m in ("S4", "S3", "S1") if f"ETo_{m}" in df.columns]
+    return pd.concat([lead_metrics(df, f"ETo_{m}").assign(method=m) for m in methods], ignore_index=True)
 
 
 # ── H1 (관측 입력 + Rs 추정) — G2 기록용 ──────────────────────────────────
@@ -402,22 +507,30 @@ def load_obs(path):
 def run_verify(fcst_paths, obs_path, stn, coef_path="rs_coef.csv", analysis=True, compare_paths=None):
     """검증 전체 계산. analysis=True면 오차분해·편향보정 탐색까지.
        compare_paths: 비교할 다른 격자의 과거 예보(같은 관측·계수·Kc로 계산해 격자 차이를 봄)"""
+    obs, meta = load_obs(obs_path)
+    lon = STATION_LON.get(str(stn))
     arch = load_archive(fcst_paths)
     rep = check_archive(arch)
-    st = service_table(arch)
-    obs, meta = load_obs(obs_path)
+    st = service_table(arch, lat=meta["lat"], lon=lon)
     coef = load_coef(stn, coef_file(coef_path))
     kp = kc_params(meta["settings"])
-    df, dropped = split_verifiable(forecast_table(st, obs, meta["lat"], meta["elev"], coef, kp))
+    ft = forecast_table(st, obs, meta["lat"], meta["elev"], coef, kp)
+    s4_table = ft.attrs.get("s4_table")
+    df, dropped = split_verifiable(ft)
     name, grid = STATIONS.get(str(stn), ("", ""))
     c3, _ = cum3(df)
     res = dict(stn=str(stn), stn_name=name, stn_grid=grid, arch=arch, check=rep, table=df, obs=obs, meta=meta,
                coef=coef, kp=kp, dropped=dropped, skipped_runs=list(getattr(arch, "skipped_runs", [])),
-               cum3_runs=set(zip(c3.run_name, c3.run)) if len(c3) else set(),
+               cum3_runs=set(zip(c3.run_name, c3.run)) if len(c3) else set(), main=main_method(df),
                h1_start=pd.Timestamp(kp["bud"]) if kp.get("bud") else df.target.min(), h1_end=obs.date.max())
+    if res["main"] == "S4":
+        res["s4_table"] = s4_table
+        res["s4_all"] = s4_fit_all(df)
+        res["methods"] = method_comparison(df)
     if compare_paths:
         arch2 = load_archive(compare_paths)
-        df2, _ = split_verifiable(forecast_table(service_table(arch2), obs, meta["lat"], meta["elev"], coef, kp))
+        df2, _ = split_verifiable(forecast_table(service_table(arch2, lat=meta["lat"], lon=lon), obs, meta["lat"],
+                                                 meta["elev"], coef, kp))
         res["compare"] = dict(check=check_archive(arch2), table=df2)
         res["grid_cmp"] = grid_comparison(df, df2)
     if analysis:
@@ -429,6 +542,8 @@ def run_verify(fcst_paths, obs_path, stn, coef_path="rs_coef.csv", analysis=True
         # 탐색: 교차검증한 보정을 적용했을 때 판정 여유가 얼마나 늘어나는지 (G4 보정 채택 판단 근거)
         res["boot_bc"] = {name: bootstrap_h2(df.assign(**{c: bc_rows[c]}), fcol=c)
                           for c, name in (("B2", "기온+풍속 보정"), ("B3", "ETo 비율 보정"))}
+        if res["main"] == "S4":   # 비교: 같은 대상일에서 하늘상태 없이(S3) 계산했을 때의 판정 불확실성
+            res["boot_s3"] = bootstrap_h2(df, fcol="ETo_S3")
         res["findings"] = findings(res)
     return res
 
@@ -456,12 +571,30 @@ def findings(res):
     """요약 시트의 해석 문장(④~). 수식으로 연결할 수 없는 Python 분석 결과와 자료 조건 경고.
        순서: 판정 불확실성 → 월별 약점 → 오차 원인 → 보정 탐색 → 격자·자료 조건"""
     out, df = [], res["table"]
+    if res.get("main") == "S4" and res.get("methods") is not None:
+        m = res["methods"]
+        r1 = lambda meth, rn: float(m[(m.method == meth) & (m.run_name == rn) & (m.lead_day == 1)].RMSE.iloc[0])
+        d1 = df[df.lead_day == 1]
+        mon = lambda c: d1.groupby(d1.target.dt.month).apply(lambda g: math.sqrt(((g[c] - g.ETo_obs) ** 2).mean()))
+        m4, m3 = mon("ETo_S4"), mon("ETo_S3")
+        better = [int(x) for x in m4.index if m4[x] < m3[x] - 0.02]
+        worse = [int(x) for x in m4.index if m4[x] > m3[x] + 0.02]
+        txt = (f"하늘상태 반영(S4, 월 단위 교차검증 계수) — 같은 대상일의 S3(하늘상태 없음)와 비교: D+1 RMSE 아침 "
+               f"{r1('S3', '아침'):.2f}→{r1('S4', '아침'):.2f}, 저녁 {r1('S3', '저녁'):.2f}→{r1('S4', '저녁'):.2f} mm/일")
+        if better:
+            txt += f". D+1이 좋아진 달 {'·'.join(map(str, better))}월"
+        if worse:
+            txt += f", 나빠진 달 {'·'.join(map(str, worse))}월"
+        out.append(txt + " (요약 방법 비교 표, 월별 시트)")
     bt = res.get("boot")
     if bt:
         rng_ = ", ".join(f"{rn} {v['rmse_d1'][0]:.2f}~{v['rmse_d1'][2]:.2f}" for rn, v in bt["runs"].items())
         frac = ", ".join(f"{rn} {v['pass_frac']:.0%}" for rn, v in bt["runs"].items())
         txt = (f"판정 불확실성({bt['block']}일 블록 부트스트랩 {bt['n_boot']:,}회): D+1 RMSE 90% 구간 {rng_} mm/일, "
                f"두 기준을 모두 충족한 비율 {frac}")
+        b3 = res.get("boot_s3")
+        if b3:
+            txt += " (같은 대상일 S3: " + ", ".join(f"{rn} {v['pass_frac']:.0%}" for rn, v in b3["runs"].items()) + ")"
         weak = [rn for rn, v in bt["runs"].items() if v["pass_frac"] < 0.9]
         if weak:
             txt += f" → {'·'.join(weak)} 발표는 기준과의 여유가 표본 변동보다 작음"
@@ -532,9 +665,14 @@ def findings(res):
     if gaps:
         txt = ", ".join(f"{a:%m/%d %H}시~{b:%m/%d %H}시({n}회)" if n > 1 else f"{a:%m/%d %H}시" for a, b, n, _ in gaps)
         dr = res.get("dropped")
-        nd = 0 if dr is None else len(dr)
-        out.append(f"자료 공백: 요소가 빠진 서비스 발표 {sum(g[2] for g in gaps)}회 제외({txt}). "
-                   f"관측이 없는 대상일 등 {nd}행 제외 (방법 시트)")
+        why = dr.drop_reason.value_counts().to_dict() if dr is not None and len(dr) else {}
+        out.append(f"자료 공백: 요소가 빠진 서비스 발표 {sum(g[2] for g in gaps)}회 제외({txt})"
+                   + (". 행 제외: " + ", ".join(f"{k} {v}행" for k, v in why.items()) if why else "") + " (방법 시트)")
+    dr = res.get("dropped")
+    if dr is not None and len(dr) and (dr.drop_reason == "하늘상태 없음").any():
+        last = df.run.max()
+        out.append(f"기간: 하늘상태 자료가 있는 발표({last:%m/%d %H}시까지)만 판정에 썼습니다 → 대상일 "
+                   f"{df.target.min():%m/%d}~{df.target.max():%m/%d}. 뒤쪽 하늘상태 자료를 받으면 다시 계산합니다")
     months = sorted(df.target.dt.month.unique())
     if not set(range(4, 10)) <= set(months):
         out.append(f"기간: 대상일 {df.target.min():%Y-%m-%d}~{df.target.max():%Y-%m-%d}만 포함한 "
@@ -553,7 +691,21 @@ def main(argv=None):
     v.add_argument("--stn", required=True); v.add_argument("--coef", default="rs_coef.csv")
     v.add_argument("--out", default=None)
     v.add_argument("--compare", nargs="+", default=None, help="비교할 다른 격자의 과거 예보 CSV 폴더(또는 파일들)")
+    k = sub.add_parser("calib-sky", help="하늘상태 포함 과거 예보 + 관측으로 운영용 S4 계수(선행일별) → rs_sky_coef.csv")
+    k.add_argument("--fcst", nargs="+", required=True); k.add_argument("--obs", required=True)
+    k.add_argument("--stn", required=True); k.add_argument("--coef", default="rs_coef.csv")
+    k.add_argument("--sky-coef", default="rs_sky_coef.csv")
     a = ap.parse_args(argv)
+
+    if a.cmd == "calib-sky":
+        res = run_verify(a.fcst, a.obs, a.stn, a.coef, analysis=False)
+        if res["main"] != "S4":
+            raise SystemExit("[중단] 하늘상태(SKY) 예보가 없어 S4 계수를 맞출 수 없습니다")
+        tab = res["s4_all"]
+        save_sky_coef(a.stn, tab, a.sky_coef, note=f"{os.path.basename(a.obs)} 예보 입력 → 관측 Rs, 선행일별")
+        print(tab.round(4).to_string(index=False))
+        print(f"[저장] {a.sky_coef}")
+        return
 
     if a.cmd == "calib":
         m0, m1 = (int(x) for x in a.months.split("-"))
@@ -570,6 +722,7 @@ def main(argv=None):
     print(f"[예보] 격자 {res['check']['location']}, 발표 {res['check'].get('issues')}회, "
           f"누락 {len(res['check'].get('missing_issues', []))}회")
     print(f"[Rs 계수] {res['coef']['source']}")
+    print(f"[주 방법] {res['main']}" + (" (하늘상태 포함, 월 단위 교차검증 계수)" if res["main"] == "S4" else ""))
     if res["coef"].get("a") is None:
         print(f"[경고] {a.coef}에 지점 {a.stn}의 S3 계수가 없어 FAO-56 기본값(S1)으로 계산했습니다. calib를 먼저 실행하세요")
     print(met.round(3).to_string(index=False))

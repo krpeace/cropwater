@@ -3,7 +3,8 @@
 """
 fcst_report.py — 02-Cycle H2 검증 엑셀 (라이브 수식)
 
-시트: 요약 / 일별비교 / 3일누적 / 월별 / 입력진단 / 오차분해 / (격자비교) / Rs계수 / 관측 / 설정 / 방법 / 차트자료
+시트: 요약 / 일별비교 / 3일누적 / 월별 / 입력진단 / 오차분해 / (격자비교) / Rs계수 / (SKY계수) / 관측 / 설정 / 방법 / 차트자료
+  - 하늘상태(SKY) 예보가 있으면 주 방법(★)은 S4(SKY계수 시트의 교차검증 계수), 없으면 S3
   - 값으로 넣는 것: 예보 일 입력(fcst_archive 집계), ASOS 관측 일자료, 오차분해·격자비교(Python 계산)
   - 나머지는 엑셀 수식: Ra·Rs·PM ETo·Kc·ETc·기준선·오차·지표·판정·월별 지표
   - 노란 칸(설정·Rs계수·합격 기준·월별 선행일)을 바꾸면 전체가 다시 계산된다
@@ -308,27 +309,66 @@ def sheet_obs(wb, obs):
 
 
 # ── 일별비교 ─────────────────────────────────────────────────────────────
-DB_GROUPS = [("A", "F", "발표·대상일", GREEN), ("G", "N", "예보 일 입력 (fcst_archive 집계값)", GREEN),
-             ("O", "X", "Rs 추정·PM 중간값 (수식)", BLUE), ("Y", "AC", "ETo (mm/일)", BROWN),
-             ("AD", "AG", "ETo 오차 (−관측)", BROWN), ("AH", "AO", "Kc·ETc (mm/일)", BLUE),
-             ("AP", "BB", "입력 진단 (관측값·예보 오차)", GREEN)]
-DB_COLS = ["발표번호", "구분", "발표시각", "발표일", "선행일 k", "대상일",
-           "마지막날(3시간·코드)", "예보 Tmax(℃)", "예보 Tmin(℃)", "예보 ea(kPa)", "예보 u10(m/s)", "예보 강수(mm)",
-           "시각 수", "이전 발표로 채운 시각 수",
-           "강수유무", "Ra", "Rso", "Rs S3", "Rs S1", "u2(m/s)", "T평균", "es", "Δ", "γ",
-           "★ 예보 ETo S3", "예보 ETo S1", "관측 ETo", "지속성", "7일평균",
-           "오차 S3", "오차 S1", "오차 지속성", "오차 7일평균",
-           "Kc", "★ 예보 ETc", "관측 ETc", "지속성 ETc", "7일평균 ETc", "ETc 오차", "지속성 ETc 오차", "7일평균 ETc 오차",
-           "관측 Tmax", "관측 Tmin", "관측 ea", "관측 u10", "관측 Rs", "관측 강수유무",
-           "Tmax 오차", "Tmin 오차", "일교차 오차", "ea 오차", "u10 오차", "Rs 오차(S3)", "강수 판정"]
+DB = {}          # 일별비교 열 키 → 열 문자 (sheet_daily가 채움. 다른 시트는 이 표로 열을 찾는다)
+K_ROWS = {}      # SKY계수 시트의 검증용 계수 범위 (sheet_skycoef가 채움)
+DB_GROUP = {"A": ("발표·대상일", GREEN), "G": ("예보 일 입력 (fcst_archive 집계값)", GREEN),
+            "R": ("Rs 추정·PM 중간값 (수식)", BLUE), "E": ("ETo (mm/일)", BROWN), "X": ("ETo 오차 (−관측)", BROWN),
+            "C": ("Kc·ETc (mm/일)", BLUE), "D": ("입력 진단 (관측값·예보 오차)", GREEN)}
 
 
-def sheet_daily(wb, df, obs_rows):
+def daily_layout(sky):
+    """일별비교 열 배치 [(키, 머리글, 묶음)]. sky=True면 하늘상태 입력과 S4(★ 주 방법) 열이 들어간다"""
+    L = [("id", "발표번호", "A"), ("rn", "구분", "A"), ("run", "발표시각", "A"), ("rdate", "발표일", "A"),
+         ("k", "선행일 k", "A"), ("tgt", "대상일", "A"),
+         ("ext", "마지막날(3시간·코드)", "G"), ("tx", "예보 Tmax(℃)", "G"), ("tn", "예보 Tmin(℃)", "G"),
+         ("ea", "예보 ea(kPa)", "G"), ("u10", "예보 u10(m/s)", "G"), ("rain", "예보 강수(mm)", "G")]
+    if sky:
+        L += [("cld", "구름많음 비율(낮)", "G"), ("ovc", "흐림 비율(낮)", "G"), ("pop", "강수확률(낮 평균)", "G")]
+    L += [("hrs", "시각 수", "G"), ("fill", "이전 발표로 채운 시각 수", "G"),
+          ("flag", "강수유무", "R"), ("ra", "Ra", "R"), ("rso", "Rso", "R")]
+    if sky:
+        L += [("fold", "S4 교차검증 묶음(대상월)", "R"), ("krow", "S4 계수 행", "R"), ("rs4", "★ Rs S4", "R")]
+    L += [("rs3", "Rs S3" if sky else "★ Rs S3", "R"), ("rs1", "Rs S1", "R"), ("u2", "u2(m/s)", "R"),
+          ("tm", "T평균", "R"), ("es", "es", "R"), ("dl", "Δ", "R"), ("gm", "γ", "R")]
+    if sky:
+        L += [("e4", "★ 예보 ETo S4", "E")]
+    L += [("e3", "예보 ETo S3" if sky else "★ 예보 ETo S3", "E"), ("e1", "예보 ETo S1", "E"),
+          ("eo", "관측 ETo", "E"), ("ep", "지속성", "E"), ("e7", "7일평균", "E")]
+    if sky:
+        L += [("x4", "오차 S4", "X")]
+    L += [("x3", "오차 S3", "X"), ("x1", "오차 S1", "X"), ("xp", "오차 지속성", "X"), ("x7", "오차 7일평균", "X"),
+          ("kc", "Kc", "C"), ("etc", "★ 예보 ETc", "C"), ("etco", "관측 ETc", "C"), ("etcp", "지속성 ETc", "C"),
+          ("etc7", "7일평균 ETc", "C"), ("xetc", "ETc 오차", "C"), ("xetcp", "지속성 ETc 오차", "C"),
+          ("xetc7", "7일평균 ETc 오차", "C"),
+          ("otx", "관측 Tmax", "D"), ("otn", "관측 Tmin", "D"), ("oea", "관측 ea", "D"), ("ou", "관측 u10", "D"),
+          ("ors", "관측 Rs", "D"), ("oflag", "관측 강수유무", "D"),
+          ("dtx", "Tmax 오차", "D"), ("dtn", "Tmin 오차", "D"), ("ddt", "일교차 오차", "D"), ("dea", "ea 오차", "D"),
+          ("du", "u10 오차", "D"), ("drs", f"Rs 오차({'S4' if sky else 'S3'})", "D")]
+    if sky:
+        L += [("drs3", "Rs 오차(S3)", "D")]
+    L += [("judge", "강수 판정", "D")]
+    return L
+
+
+def sheet_daily(wb, df, obs_rows, sky=False):
     ws = wb.create_sheet("일별비교")
-    for c0, c1, label, fill in DB_GROUPS:
-        H(ws, 1, _ci(c0), label, fill=fill)
-        ws.merge_cells(f"{c0}1:{c1}1")
-    for j, h in enumerate(DB_COLS, 1):
+    layout = daily_layout(sky)
+    DB.clear()
+    DB.update({key: CL(j) for j, (key, _, _) in enumerate(layout, 1)})
+    main = "4" if sky else "3"
+    DB.update(eto=DB[f"e{main}"], err=DB[f"x{main}"], rs=DB[f"rs{main}"])
+    # 1행: 열 묶음 머리글
+    j = 1
+    while j <= len(layout):
+        g = layout[j - 1][2]
+        j1 = j
+        while j1 < len(layout) and layout[j1][2] == g:
+            j1 += 1
+        H(ws, 1, j, DB_GROUP[g][0], fill=DB_GROUP[g][1])
+        if j1 > j:
+            ws.merge_cells(start_row=1, start_column=j, end_row=1, end_column=j1)
+        j = j1 + 1
+    for j, (_, h, _) in enumerate(layout, 1):
         H(ws, 2, j, h, fill=LIGHT, white=False, size=9)
     S, R = S_ROWS, R_ROWS
     a0, a1 = obs_rows
@@ -337,53 +377,126 @@ def sheet_daily(wb, df, obs_rows):
     r0 = 3
     run_ids = {run: i + 1 for i, run in enumerate(sorted(df.run.unique(), key=lambda t: (t.hour != 2, t)))}
     df = df.sort_values(["run_name", "run", "lead_day"], key=lambda s: s.map({"아침": 0, "저녁": 1}) if s.name == "run_name" else s)
+    folds = None
+    if sky:
+        from cropwater_fcst import month_folds
+        folds = month_folds(df.target).values
+    fmt_val = {"run": DTM, "rdate": DATE, "tgt": DATE, "ea": F3, "u10": F3, "cld": F2, "ovc": F2, "pop": F2}
+    fmt_f = {"flag": "0", "oflag": "0", "krow": "0", "es": F3, "dl": F3, "kc": F3, "oea": F3, "dea": F3,
+             "gm": "0.00000", "judge": "General"}
     for i, row in enumerate(df.itertuples()):
         r = r0 + i
-        vals = [run_ids[row.run], row.run_name, row.run.to_pydatetime(), row.run.date(), int(row.lead_day),
-                row.target.date(), ("○" if row.ext else ""), row.Tmax, row.Tmin, float(row.ea), float(row.u10),
-                float(row.rain), int(row.hours), int(row.filled)]
-        for j, v in enumerate(vals, 1):
-            x = ws.cell(r, j, v)
-            x.number_format = {3: DTM, 4: DATE, 6: DATE, 10: F3, 11: F3}.get(j, "General")
+        c = lambda key: f"{DB[key]}{r}"
+        vals = dict(id=run_ids[row.run], rn=row.run_name, run=row.run.to_pydatetime(), rdate=row.run.date(),
+                    k=int(row.lead_day), tgt=row.target.date(), ext=("○" if row.ext else ""), tx=row.Tmax, tn=row.Tmin,
+                    ea=float(row.ea), u10=float(row.u10), rain=float(row.rain), hrs=int(row.hours), fill=int(row.filled))
+        if sky:
+            vals.update(cld=float(row.sky_cloudy), ovc=float(row.sky_overcast),
+                        pop=(None if pd.isna(getattr(row, "pop", np.nan)) else float(row.pop)), fold=str(folds[i]))
+        for key, v in vals.items():
+            x = ws[c(key)]; x.value = v
+            x.number_format = fmt_val.get(key, "General")
+        dT = f"SQRT(MAX({c('tx')}-{c('tn')},0))"
         f = {
-            "O": f"=IF(L{r}>={S['rthr']},1,0)",
-            "P": f"={look('R', f'F{r}')}",
-            "Q": f"={look('S', f'F{r}')}",
-            "R": f"=MIN(MAX(({R['a']}+{R['b']}*SQRT(MAX(H{r}-I{r},0))+{R['c']}*O{r})*P{r},0.05*P{r}),Q{r})",
-            "S": f"=MIN(MAX({S['krs']}*SQRT(MAX(H{r}-I{r},0))*P{r},0.05*P{r}),Q{r})",
-            "T": f"=K{r}*4.87/LN(67.8*{S['fanem']}-5.42)",
-            "U": f"=(H{r}+I{r})/2",
-            "V": f"=({E0(f'H{r}')}+{E0(f'I{r}')})/2",
-            "W": f"=4098*{E0(f'U{r}')}/(U{r}+237.3)^2",
-            "X": f"=0.000665*{S['pelev']}",
-            "Y": pm(f"H{r}", f"I{r}", f"J{r}", f"T{r}", f"R{r}", f"Q{r}", f"U{r}", f"V{r}", f"W{r}", f"X{r}"),
-            "Z": pm(f"H{r}", f"I{r}", f"J{r}", f"T{r}", f"S{r}", f"Q{r}", f"U{r}", f"V{r}", f"W{r}", f"X{r}"),
-            "AA": f"={look('X', f'F{r}')}",
-            "AB": f"={look('X', f'D{r}-1')}",
-            "AC": f"={look('AH', f'D{r}')}",
-            "AD": f"=Y{r}-AA{r}", "AE": f"=Z{r}-AA{r}", "AF": f"=AB{r}-AA{r}", "AG": f"=AC{r}-AA{r}",
-            "AH": f"={look('AF', f'F{r}')}",
-            "AI": f"=AH{r}*Y{r}", "AJ": f"=AH{r}*AA{r}", "AK": f"=AH{r}*AB{r}", "AL": f"=AH{r}*AC{r}",
-            "AM": f"=AI{r}-AJ{r}", "AN": f"=AK{r}-AJ{r}", "AO": f"=AL{r}-AJ{r}",
-            "AP": f"={look('B', f'F{r}')}", "AQ": f"={look('C', f'F{r}')}", "AR": f"={look('M', f'F{r}')}",
-            "AS": f"={look('E', f'F{r}')}", "AT": f"={look('I', f'F{r}')}", "AU": f"={look('Y', f'F{r}')}",
-            "AV": f"=H{r}-AP{r}", "AW": f"=I{r}-AQ{r}", "AX": f"=(H{r}-I{r})-(AP{r}-AQ{r})", "AY": f"=J{r}-AR{r}",
-            "AZ": f"=K{r}-AS{r}", "BA": f"=R{r}-AT{r}",
-            "BB": f'=IF(O{r}=1,IF(AU{r}=1,"적중","오보"),IF(AU{r}=1,"놓침","무강수 일치"))',
+            "flag": f"=IF({c('rain')}>={S['rthr']},1,0)",
+            "ra": f"={look('R', c('tgt'))}",
+            "rso": f"={look('S', c('tgt'))}",
+            "rs3": f"=MIN(MAX(({R['a']}+{R['b']}*{dT}+{R['c']}*{c('flag')})*{c('ra')},0.05*{c('ra')}),{c('rso')})",
+            "rs1": f"=MIN(MAX({S['krs']}*{dT}*{c('ra')},0.05*{c('ra')}),{c('rso')})",
+            "u2": f"={c('u10')}*4.87/LN(67.8*{S['fanem']}-5.42)",
+            "tm": f"=({c('tx')}+{c('tn')})/2",
+            "es": f"=({E0(c('tx'))}+{E0(c('tn'))})/2",
+            "dl": f"=4098*{E0(c('tm'))}/({c('tm')}+237.3)^2",
+            "gm": f"=0.000665*{S['pelev']}",
+            "e3": pm(c("tx"), c("tn"), c("ea"), c("u2"), c("rs3"), c("rso"), c("tm"), c("es"), c("dl"), c("gm")),
+            "e1": pm(c("tx"), c("tn"), c("ea"), c("u2"), c("rs1"), c("rso"), c("tm"), c("es"), c("dl"), c("gm")),
+            "eo": f"={look('X', c('tgt'))}",
+            "ep": f"={look('X', c('rdate') + '-1')}",
+            "e7": f"={look('AH', c('rdate'))}",
+            "x3": f"={c('e3')}-{c('eo')}", "x1": f"={c('e1')}-{c('eo')}",
+            "xp": f"={c('ep')}-{c('eo')}", "x7": f"={c('e7')}-{c('eo')}",
+            "kc": f"={look('AF', c('tgt'))}",
+            "etc": f"={c('kc')}*{DB['eto']}{r}", "etco": f"={c('kc')}*{c('eo')}", "etcp": f"={c('kc')}*{c('ep')}",
+            "etc7": f"={c('kc')}*{c('e7')}", "xetc": f"={c('etc')}-{c('etco')}", "xetcp": f"={c('etcp')}-{c('etco')}",
+            "xetc7": f"={c('etc7')}-{c('etco')}",
+            "otx": f"={look('B', c('tgt'))}", "otn": f"={look('C', c('tgt'))}", "oea": f"={look('M', c('tgt'))}",
+            "ou": f"={look('E', c('tgt'))}", "ors": f"={look('I', c('tgt'))}", "oflag": f"={look('Y', c('tgt'))}",
+            "dtx": f"={c('tx')}-{c('otx')}", "dtn": f"={c('tn')}-{c('otn')}",
+            "ddt": f"=({c('tx')}-{c('tn')})-({c('otx')}-{c('otn')})", "dea": f"={c('ea')}-{c('oea')}",
+            "du": f"={c('u10')}-{c('ou')}", "drs": f"={DB['rs']}{r}-{c('ors')}",
+            "judge": f'=IF({c("flag")}=1,IF({c("oflag")}=1,"적중","오보"),IF({c("oflag")}=1,"놓침","무강수 일치"))',
         }
-        for col, formula in f.items():
-            x = ws[f"{col}{r}"]; x.value = formula
-            x.number_format = "0" if col in ("O", "AU") else F3 if col in ("V", "W", "AH", "AR", "AY") else \
-                "0.00000" if col == "X" else "General" if col == "BB" else F2
+        if sky:
+            K = K_ROWS
+            kx = lambda n: f"INDEX({K[n]},{c('krow')})"
+            f.update({
+                "krow": f'=MATCH({c("fold")}&"|"&{c("k")},{K["key"]},0)',
+                "rs4": (f"=MIN(MAX(({kx('a')}+{kx('b')}*{dT}+{kx('c')}*{c('flag')}+{kx('d')}*{c('cld')}"
+                        f"+{kx('e')}*{c('ovc')})*{c('ra')},0.05*{c('ra')}),{c('rso')})"),
+                "e4": pm(c("tx"), c("tn"), c("ea"), c("u2"), c("rs4"), c("rso"), c("tm"), c("es"), c("dl"), c("gm")),
+                "x4": f"={c('e4')}-{c('eo')}",
+                "drs3": f"={c('rs3')}-{c('ors')}",
+            })
+        for key, formula in f.items():
+            x = ws[c(key)]; x.value = formula
+            x.number_format = fmt_f.get(key, F2)
     r1 = r0 + len(df) - 1
-    for j in range(1, len(DB_COLS) + 1):
+    for j in range(1, len(layout) + 1):
         ws.column_dimensions[CL(j)].width = 10
-    for col, w in {"B": 6, "C": 16, "D": 11, "F": 11, "A": 7, "E": 7}.items():
-        ws.column_dimensions[col].width = w
+    for key, w in {"rn": 6, "run": 16, "rdate": 11, "tgt": 11, "id": 7, "k": 7}.items():
+        ws.column_dimensions[DB[key]].width = w
     ws.row_dimensions[2].height = 42
-    ws.freeze_panes = "G3"
-    ws.auto_filter.ref = f"A2:{CL(len(DB_COLS))}{r1}"
+    ws.freeze_panes = f"{DB['ext']}3"
+    ws.auto_filter.ref = f"A2:{CL(len(layout))}{r1}"
     return ws, (r0, r1), run_ids
+
+
+# ── SKY계수 (S4 교차검증 계수, Python 적합값) ───────────────────────────────
+def sheet_skycoef(wb, res):
+    ws = wb.create_sheet("SKY계수")
+    T(ws, 1, 1, "S4 하늘상태 반영 Rs 계수 — 예보 입력(일교차·강수유무·구름 비율) → 관측 Rs, 선행일별 (Python 최소제곱 적합값)",
+      12, True, GREEN)
+    T(ws, 2, 1, "Rs/Ra = a + b·√(Tmax−Tmin) + c·강수유무 + d·구름많음 비율 + e·흐림 비율, [0.05Ra, Rso]로 제한. "
+                "구름 비율 = 낮 시간 일사 비중(태양고도 사인)으로 가중한 하늘상태(SKY) 비율 (THEORY 9장)", 9, color="555555")
+    T(ws, 3, 1, "① 검증용 계수 — 월 단위 교차검증: 대상월의 행에는 그 달을 뺀 나머지 달로 맞춘 계수를 씁니다. "
+                "일별비교 시트가 '묶음|선행일' 키로 이 표를 찾습니다. 노란 칸을 바꾸면 S4 예보가 다시 계산됩니다.", 9, color=BROWN)
+    hdr = ["키", "검증 달(묶음)", "선행일 k", "학습 행 수", "a", "b", "c (강수유무)", "d (구름많음)", "e (흐림)"]
+    for j, h in enumerate(hdr, 1):
+        H(ws, 5, j, h, size=9)
+    tab = res["s4_table"].sort_values(["fold", "lead_day"]).reset_index(drop=True)
+    r0 = 6
+    for i, row in tab.iterrows():
+        r = r0 + i
+        C(ws, r, 1, f"{row.fold}|{int(row.lead_day)}"); C(ws, r, 2, row.fold); C(ws, r, 3, int(row.lead_day))
+        C(ws, r, 4, int(row.n), "0")
+        for j, n in enumerate(("a", "b", "c", "d", "e"), 5):
+            C(ws, r, j, float(row[n]), "0.0000", fill=YEL)
+    r1 = r0 + len(tab) - 1
+    rng = lambda col: f"SKY계수!${col}${r0}:${col}${r1}"
+    K_ROWS.update(key=rng("A"), a=rng("E"), b=rng("F"), c=rng("G"), d=rng("H"), e=rng("I"))
+    r = r1 + 2
+    T(ws, r, 1, "② 운영 계수 — 자료 전체로 선행일별 적합(rs_sky_coef.csv, calib-sky). 같은 자료로 맞춘 값이라 검증에는 쓰지 않습니다. "
+                "다른 해 자료로 독립 검증할 때와 운영(G5)에 씁니다.", 9, color=BROWN); r += 1
+    hdr = ["선행일 k", "a", "b", "c (강수유무)", "d (구름많음)", "e (흐림)", "적합 행 수", "적합 기간", "Rs RMSE (적합 자료)"]
+    for j, h in enumerate(hdr, 1):
+        H(ws, r, j, h, size=9)
+    r += 1
+    for row in res["s4_all"].itertuples():
+        C(ws, r, 1, int(row.lead_day))
+        for j, n in enumerate(("a", "b", "c", "d", "e"), 2):
+            C(ws, r, j, float(getattr(row, n)), "0.0000")
+        C(ws, r, 7, int(row.n), "0"); C(ws, r, 8, f"{row.fit_start} ~ {row.fit_end}"); C(ws, r, 9, float(row.rmse_rs), F2)
+        r += 1
+    r += 1
+    for n in ["읽는 법: d·e가 음수 = 구름이 많을수록 Rs가 줄어듦. 가까운 날(D+0)에서 먼 날(D+3)로 갈수록 흐림 계수(e)의 크기가 줄고 "
+              "강수유무 계수(c)의 크기가 커지는 경향 → 먼 날의 하늘상태 예보는 덜 믿을 만하다는 뜻입니다.",
+              "관측 운량이 없어 계수는 '예보 입력 → 관측 Rs'로 맞췄습니다. 그래서 예보 입력의 계통오차(좁은 일교차, 잦은 비 예보)까지 계수가 흡수합니다.",
+              "S3(Rs계수 시트)는 다른 해(2025) 관측으로 정한 계수라 이 표와 성격이 다릅니다. S4 계수의 다른 해 검증은 2025년 하늘상태 예보를 받은 뒤 합니다."]:
+        T(ws, r, 1, n, 9, color="555555"); r += 1
+    widths(ws, {"A": 14, "B": 13, "C": 9, "D": 11, **{CL(j): 12 for j in range(5, 10)}})
+    ws.column_dimensions["H"].width = 24
+    ws.freeze_panes = "A6"
+    return ws
 
 
 def _ci(col):
@@ -413,11 +526,12 @@ def sheet_cum3(wb, df, db_rows, run_ids, keep=None):
         k0 = first.get(row.run_name, int(df[df.run == row.run].lead_day.min()))
         C(ws, r, 1, row.id); C(ws, r, 2, row.run_name); C(ws, r, 3, row.run.to_pydatetime(), DTM)
         C(ws, r, 4, f"D+{k0}~D+{k0 + 2}"); C(ws, r, 5, k0)
-        s = lambda col: f'=SUMIFS({db(col)},{db("A")},$A{r},{db("E")},">="&$E{r},{db("E")},"<="&($E{r}+2))'
-        for j, col in zip(range(6, 9), ("Y", "AA", "AB")):
+        s = lambda col: (f'=SUMIFS({db(col)},{db(DB["id"])},$A{r},{db(DB["k"])},">="&$E{r},'
+                         f'{db(DB["k"])},"<="&($E{r}+2))')
+        for j, col in zip(range(6, 9), (DB["eto"], DB["eo"], DB["ep"])):
             C(ws, r, j, s(col), F2)
         C(ws, r, 9, f"=F{r}-G{r}", F2); C(ws, r, 10, f"=H{r}-G{r}", F2)
-        for j, col in zip(range(11, 14), ("AI", "AJ", "AK")):
+        for j, col in zip(range(11, 14), (DB["etc"], DB["etco"], DB["etcp"])):
             C(ws, r, j, s(col), F2)
         C(ws, r, 14, f"=K{r}-L{r}", F2); C(ws, r, 15, f"=M{r}-L{r}", F2)
         r += 1
@@ -427,7 +541,7 @@ def sheet_cum3(wb, df, db_rows, run_ids, keep=None):
 
 
 # ── 입력진단 ─────────────────────────────────────────────────────────────
-def sheet_diag(wb, db_rows, groups):
+def sheet_diag(wb, db_rows, groups, main="S3"):
     ws = wb.create_sheet("입력진단")
     T(ws, 1, 1, "입력 진단 — 예보 입력 − 관측 (편향 = 평균, RMSE). 기온 정의 차이: 예보 TMX 09~18시·TMN 03~09시, ASOS 0~24시", 11, True, GREEN)
     hdr = ["구분", "선행일", "n", "Tmax 편향", "Tmax RMSE", "Tmin 편향", "Tmin RMSE", "일교차 편향", "일교차 RMSE",
@@ -440,22 +554,24 @@ def sheet_diag(wb, db_rows, groups):
     r = 3
     for rn, k in groups:
         C(ws, r, 1, rn); C(ws, r, 2, k)
-        crit = f'{db("B")},$A{r},{db("E")},$B{r}'
-        m = f"({db('B')}=$A{r})*({db('E')}=$B{r})"
+        crit = f'{db(DB["rn"])},$A{r},{db(DB["k"])},$B{r}'
+        m = f"({db(DB['rn'])}=$A{r})*({db(DB['k'])}=$B{r})"
         C(ws, r, 3, f"=COUNTIFS({crit})", "0")
-        for j, col in zip(range(4, 16, 2), ("AV", "AW", "AX", "AY", "AZ", "BA")):
-            fmt = F3 if col == "AY" else F2
+        for j, key in zip(range(4, 16, 2), ("dtx", "dtn", "ddt", "dea", "du", "drs")):
+            col = DB[key]
+            fmt = F3 if key == "dea" else F2
             C(ws, r, j, f"=AVERAGEIFS({db(col)},{crit})", fmt)
             C(ws, r, j + 1, f"=SQRT(SUMPRODUCT({m}*{db(col)}^2)/$C{r})", fmt)
         for j, lab in zip(range(16, 20), ("적중", "놓침", "오보", "무강수 일치")):
-            C(ws, r, j, f'=COUNTIFS({crit},{db("BB")},"{lab}")', "0")
+            C(ws, r, j, f'=COUNTIFS({crit},{db(DB["judge"])},"{lab}")', "0")
         C(ws, r, 20, f"=IF(P{r}+Q{r}>0,P{r}/(P{r}+Q{r}),0)", F2)
         C(ws, r, 21, f"=IF(P{r}+R{r}>0,R{r}/(P{r}+R{r}),0)", F2)
         C(ws, r, 22, f"=IF(P{r}+Q{r}+R{r}>0,P{r}/(P{r}+Q{r}+R{r}),0)", F2)
         r += 1
     r += 1
     notes = ["단위: 기온 ℃, ea kPa, u10 m/s, Rs MJ/m²/일. 편향 = 예보 − 관측 (+면 예보가 큼).",
-             "Rs 예보는 관측이 아니라 식(50)+강수유무 보정으로 추정한 값(S3)입니다.",
+             (f"Rs 예보는 관측이 아니라 추정한 값({main})입니다. "
+              + ("S4 = 식(50)형 + 강수유무 + 하늘상태 구름 비율(SKY계수 시트)." if main == "S4" else "S3 = 식(50) + 강수유무 보정.")),
              "강수: 예보 PCP 일합계와 ASOS 일강수를 1 mm 기준으로 판정. POD = 적중/(적중+놓침), FAR = 오보/(적중+오보), CSI = 적중/(적중+놓침+오보).",
              "아침 D+k와 전날 저녁 D+(k+1)은 같은 대상일입니다. 최고·최저기온은 17시 발표 값이 다음 날 02시 발표까지 유지되는 경우가 많아 두 발표의 기온 진단이 거의 같습니다."]
     for n in notes:
@@ -472,7 +588,7 @@ def sheet_attr(wb, res):
                 "설정·계수를 바꿔도 이 시트는 다시 계산되지 않습니다.", 9, color=BROWN)
     att, names = res["attr"], res["attr_names"]
     r = 4
-    T(ws, r, 1, "① 예보 입력을 하나씩 관측값으로 바꿨을 때의 ETo RMSE (mm/일, S3)", 11, True, GREEN); r += 1
+    T(ws, r, 1, f"① 예보 입력을 하나씩 관측값으로 바꿨을 때의 ETo RMSE (mm/일, {res.get('main', 'S3')})", 11, True, GREEN); r += 1
     hdr = ["구분", "선행일"] + names
     for j, h in enumerate(hdr, 1):
         H(ws, r, j, h, size=9)
@@ -489,8 +605,10 @@ def sheet_attr(wb, res):
     r += 1
     T(ws, r, 1, "② 지점 보정 탐색 — 월 단위 교차검증 (보정값은 검증 달을 뺀 나머지 달로 추정)", 11, True, GREEN); r += 1
     T(ws, r, 1, f"교차검증 묶음: {', '.join(res['bc_folds'])} (마지막 달 대상일이 10일 미만이면 앞 달에 포함). H2 판정에는 쓰지 않는 탐색 결과입니다.", 9, color="555555"); r += 1
-    T(ws, r, 1, "방법: 기온 보정 = Tmax·Tmin에서 평균 편향을 뺌 / 기온+풍속 = 풍속 편향도 뺌 / ETo 비율 = 예보 ETo × (관측 합 ÷ 예보 합) / "
-                "Rs 계수 재보정 = Rs 식의 a·b·c를 예보 일교차·예보 강수유무와 관측 Rs로 다시 맞춤", 9, color="555555"); r += 1
+    T(ws, r, 1, "방법: 기온 보정 = Tmax·Tmin에서 평균 편향을 뺌 / 기온+풍속 = 풍속 편향도 뺌 / ETo 비율 = 예보 ETo × (관측 합 ÷ 예보 합)"
+                + (" / Rs 계수 재보정 = Rs 식의 a·b·c를 예보 일교차·예보 강수유무와 관측 Rs로 다시 맞춤" if res.get("main", "S3") == "S3" else
+                   ". 주 방법 S4는 계수가 이미 예보 입력으로 맞춘 교차검증 값이라 'Rs 계수 재보정'은 생략하고, ETo 비율은 검증 달까지 뺀 계수로 "
+                   "다시 계산한 학습 행에서 구함(중첩 교차검증)"), 9, color="555555"); r += 1
     bc = res["bc"]
     methods = list(dict.fromkeys(bc.method))
     for metric, label, fmt in (("RMSE", "RMSE (mm/일)", F3), ("MBE", "MBE (mm/일)", F3), ("skill_pers", "지속성 대비 개선율", PCT),
@@ -618,7 +736,7 @@ def sheet_grid_compare(wb, res):
 SUM_CELLS = {}   # 요약 시트 합격 기준 셀 (sheet_summary가 채움, 월별 시트가 참조)
 
 
-def sheet_month(wb, df, db_rows):
+def sheet_month(wb, df, db_rows, main="S3"):
     """대상일 월별 성능(①)·달마다 기준 적용(②, 참고)·입력 편향(③). 모두 일별비교 시트를 참조하는 수식"""
     ws = wb.create_sheet("월별")
     d0, d1 = db_rows
@@ -637,12 +755,12 @@ def sheet_month(wb, df, db_rows):
     C(ws, 4, 11, f"={SUM_CELLS['rmse']}", F2)
     T(ws, 4, 12, "← 기준은 요약 시트를 따라감", 9, color="555555")
     K, SK, RM = "$D$4", "$H$4", "$K$4"
-    mk = lambda r, k: f"({db('B')}=$A{r})*({db('E')}={k})*(MONTH({db('F')})=$B{r})"
+    mk = lambda r, k: f"({db(DB['rn'])}=$A{r})*({db(DB['k'])}={k})*(MONTH({db(DB['tgt'])})=$B{r})"
     bad = PatternFill("solid", fgColor=FAIL_FILL)
 
     # ① 월별 성능
     r = 6
-    T(ws, r, 1, "① 월별 예보 ETo 성능 (선행일 k, S3, mm/일)", 11, True, GREEN); r += 1
+    T(ws, r, 1, f"① 월별 예보 ETo 성능 (선행일 k, {main}, mm/일)", 11, True, GREEN); r += 1
     for j, h in enumerate(["구분", "월", "n", "관측 평균", "예보 평균", "MBE", "RMSE", "상대 RMSE", "지속성 RMSE",
                            "개선율(지속성)", "7일평균 RMSE", "개선율(7일평균)"], 1):
         H(ws, r, j, h, size=9)
@@ -654,14 +772,14 @@ def sheet_month(wb, df, db_rows):
             z = lambda expr, rr=r: f'=IF($C{rr}=0,"-",{expr})'
             C(ws, r, 1, rn); C(ws, r, 2, m)
             C(ws, r, 3, f"=SUMPRODUCT({mask})", "0")
-            C(ws, r, 4, z(f"SUMPRODUCT({mask}*{db('AA')})/$C{r}"), F2)
-            C(ws, r, 5, z(f"SUMPRODUCT({mask}*{db('Y')})/$C{r}"), F2)
-            C(ws, r, 6, z(f"SUMPRODUCT({mask}*{db('AD')})/$C{r}"), F2)
-            C(ws, r, 7, z(f"SQRT(SUMPRODUCT({mask}*{db('AD')}^2)/$C{r})"), F2)
+            C(ws, r, 4, z(f"SUMPRODUCT({mask}*{db(DB['eo'])})/$C{r}"), F2)
+            C(ws, r, 5, z(f"SUMPRODUCT({mask}*{db(DB['eto'])})/$C{r}"), F2)
+            C(ws, r, 6, z(f"SUMPRODUCT({mask}*{db(DB['err'])})/$C{r}"), F2)
+            C(ws, r, 7, z(f"SQRT(SUMPRODUCT({mask}*{db(DB['err'])}^2)/$C{r})"), F2)
             C(ws, r, 8, z(f"G{r}/D{r}"), PCT)
-            C(ws, r, 9, z(f"SQRT(SUMPRODUCT({mask}*{db('AF')}^2)/$C{r})"), F2)
+            C(ws, r, 9, z(f"SQRT(SUMPRODUCT({mask}*{db(DB['xp'])}^2)/$C{r})"), F2)
             C(ws, r, 10, z(f"1-G{r}/I{r}"), PCT)
-            C(ws, r, 11, z(f"SQRT(SUMPRODUCT({mask}*{db('AG')}^2)/$C{r})"), F2)
+            C(ws, r, 11, z(f"SQRT(SUMPRODUCT({mask}*{db(DB['x7'])}^2)/$C{r})"), F2)
             C(ws, r, 12, z(f"1-G{r}/K{r}"), PCT)
             rows1[(rn, m)] = r
             r += 1
@@ -687,9 +805,9 @@ def sheet_month(wb, df, db_rows):
             C(ws, r, 3, f"=SUMPRODUCT({mk(r, 1)})", "0")
             for j, k in zip((4, 5, 6), (1, 2, 3)):
                 a = mk(r, k)
-                C(ws, r, j, f'=IF(SUMPRODUCT({a})=0,"-",1-SQRT(SUMPRODUCT({a}*{db("AD")}^2)/SUMPRODUCT({a}*{db("AF")}^2)))', PCT)
+                C(ws, r, j, f'=IF(SUMPRODUCT({a})=0,"-",1-SQRT(SUMPRODUCT({a}*{db(DB["err"])}^2)/SUMPRODUCT({a}*{db(DB["xp"])}^2)))', PCT)
             C(ws, r, 7, f'=IF(COUNT(D{r}:F{r})=0,"-",MIN(D{r}:F{r}))', PCT)
-            C(ws, r, 8, f'=IF(C{r}=0,"-",SQRT(SUMPRODUCT({mk(r, 1)}*{db("AD")}^2)/C{r}))', F2)
+            C(ws, r, 8, f'=IF(C{r}=0,"-",SQRT(SUMPRODUCT({mk(r, 1)}*{db(DB["err"])}^2)/C{r}))', F2)
             C(ws, r, 9, f'=IF(ISNUMBER(G{r}),IF(G{r}>={SK},"충족","미달"),"-")')
             C(ws, r, 10, f'=IF(ISNUMBER(H{r}),IF(H{r}<={RM},"충족","미달"),"-")')
             C(ws, r, 11, f'=IF(AND(I{r}="충족",J{r}="충족"),"충족","미달")', bold=True)
@@ -702,22 +820,22 @@ def sheet_month(wb, df, db_rows):
     # ③ 월별 입력 편향
     T(ws, r, 1, "③ 월별 입력 편향 (예보 − 관측, 선행일 k)", 11, True, GREEN); r += 1
     for j, h in enumerate(["구분", "월", "n", "Tmax (℃)", "Tmin (℃)", "일교차 (℃)", "ea (kPa)", "u10 (m/s)",
-                           "Rs S3 (MJ/m²/일)", "예보 강수일 비율", "관측 강수일 비율", "오보 (일)", "놓침 (일)"], 1):
+                           f"Rs {main} (MJ/m²/일)", "예보 강수일 비율", "관측 강수일 비율", "오보 (일)", "놓침 (일)"], 1):
         H(ws, r, j, h, size=9)
     r += 1
     for rn in runs:
         for m in months:
             mask = mk(r, K)
             C(ws, r, 1, rn); C(ws, r, 2, m); C(ws, r, 3, f"=SUMPRODUCT({mask})", "0")
-            for j, col in zip(range(4, 10), ("AV", "AW", "AX", "AY", "AZ", "BA")):
-                C(ws, r, j, f'=IF($C{r}=0,"-",SUMPRODUCT({mask}*{db(col)})/$C{r})', F3 if col == "AY" else F2)
-            C(ws, r, 10, f'=IF($C{r}=0,"-",SUMPRODUCT({mask}*{db("O")})/$C{r})', PCT)
-            C(ws, r, 11, f'=IF($C{r}=0,"-",SUMPRODUCT({mask}*{db("AU")})/$C{r})', PCT)
-            C(ws, r, 12, f'=SUMPRODUCT({mask}*({db("BB")}="오보"))', "0")
-            C(ws, r, 13, f'=SUMPRODUCT({mask}*({db("BB")}="놓침"))', "0")
+            for j, key in zip(range(4, 10), ("dtx", "dtn", "ddt", "dea", "du", "drs")):
+                C(ws, r, j, f'=IF($C{r}=0,"-",SUMPRODUCT({mask}*{db(DB[key])})/$C{r})', F3 if key == "dea" else F2)
+            C(ws, r, 10, f'=IF($C{r}=0,"-",SUMPRODUCT({mask}*{db(DB["flag"])})/$C{r})', PCT)
+            C(ws, r, 11, f'=IF($C{r}=0,"-",SUMPRODUCT({mask}*{db(DB["oflag"])})/$C{r})', PCT)
+            C(ws, r, 12, f'=SUMPRODUCT({mask}*({db(DB["judge"])}="오보"))', "0")
+            C(ws, r, 13, f'=SUMPRODUCT({mask}*({db(DB["judge"])}="놓침"))', "0")
             r += 1
     r += 1
-    for n in ["편향 = 예보 − 관측 (+면 예보가 큼). Rs는 예보 입력(일교차·강수유무)으로 추정한 값(S3) − 관측 Rs.",
+    for n in [f"편향 = 예보 − 관측 (+면 예보가 큼). Rs는 예보 입력으로 추정한 값({main}) − 관측 Rs.",
               "Rs계수 시트의 월별 표(관측 입력으로 추정한 Rs의 편향)와 비교하면, 예보 입력 탓(일교차·강수유무 예보오차)과 "
               "추정식 자체 탓을 나눠 볼 수 있습니다.",
               "예보 강수일 비율이 관측보다 크면(오보가 많으면) 강수유무 보정(계수 c < 0) 때문에 Rs와 ETo가 과소추정됩니다.",
@@ -754,8 +872,8 @@ def sheet_chartdata(wb, df, db_rows, obs_rows):
         r = 2 + i
         C(ws, r, 1, d.date(), DATE)
         C(ws, r, 2, f"=INDEX(관측!$X${a0}:$X${a1},MATCH(A{r},관측!$A${a0}:$A${a1},0))", F2)
-        C(ws, r, 3, f'=SUMIFS({db("Y")},{db("B")},"아침",{db("E")},1,{db("F")},A{r})', F2)
-        C(ws, r, 4, f'=SUMIFS({db("Y")},{db("B")},"저녁",{db("E")},1,{db("F")},A{r})', F2)
+        C(ws, r, 3, f'=SUMIFS({db(DB["eto"])},{db(DB["rn"])},"아침",{db(DB["k"])},1,{db(DB["tgt"])},A{r})', F2)
+        C(ws, r, 4, f'=SUMIFS({db(DB["eto"])},{db(DB["rn"])},"저녁",{db(DB["k"])},1,{db(DB["tgt"])},A{r})', F2)
     widths(ws, {"A": 12, "B": 11, "C": 13, "D": 13})
     return ws, (2, 1 + len(dates))
 
@@ -772,14 +890,23 @@ def sheet_summary(wb, res, db_rows, c3_rows, groups, chart_rows):
     n_m, n_e = (int(df[df.run_name == n].run.nunique()) for n in ("아침", "저녁"))
     gaps = run_gaps(res.get("skipped_runs", []))
     dropped = res.get("dropped")
+    main = res.get("main", "S3")
+    opt = [e for e in ("SKY", "POP") if e in chk.get("coverage", {})]
+    opt_txt = ""
+    if opt:
+        cv = chk["coverage"]
+        opt_txt = " · 선택 요소 " + ", ".join(f"{e} {cv[e]['first'][5:13]}시~{cv[e]['last'][5:13]}시" for e in opt)
+    rs_txt = (f"S4 = 식(50)형 + 강수유무 + 낮 시간 구름많음·흐림 비율(하늘상태 예보), 선행일별 계수를 월 단위 교차검증으로 정함"
+              f" — SKY계수 시트. 비교: S3(계수 {res['coef'].get('source', '')}, Rs계수 시트)" if main == "S4" else
+              f"식(50) + 강수유무 보정(S3), 계수 {res['coef'].get('source', '')} — Rs계수 시트")
     info = [
         ("예보 자료", f"기상자료개방포털 과거 단기예보(격자 {', '.join(chk['location'])}) · TMX·TMN·TMP·REH·WSD·PCP · "
                     f"{iss[0]:%Y-%m-%d %H}시 ~ {iss[-1]:%Y-%m-%d %H}시 발표 중 6요소가 모두 있는 발표 {chk['issues']}회"
-                    f" (한 요소라도 빠진 발표 {len(chk['missing_issues'])}회)"),
+                    f" (한 요소라도 빠진 발표 {len(chk['missing_issues'])}회){opt_txt}"),
         ("서비스 발표", f"아침 02시 {n_m}회 → 오늘~D+3 · 저녁 17시 {n_e}회 → 내일~D+4 (다른 발표는 이전 시각 채움에만 사용)"),
         ("대상일", f"{df.target.min():%Y-%m-%d} ~ {df.target.max():%Y-%m-%d}"),
         ("관측 기준", f"ASOS {res['stn']} 일자료 → FAO-56 PM ETo (관측 Rs, 01-Cycle 규칙과 동일, 차이 < 1e-12 mm)"),
-        ("Rs 추정", f"식(50) + 강수유무 보정(S3), 계수 {res['coef'].get('source', '')} — Rs계수 시트"),
+        (f"Rs 추정 (★ {main})", rs_txt),
         ("작물계수", f"{res['meta']['settings'].get('작물', '')} 시나리오 {res['kp']['scenario']}, 생육 시작 {res['kp']['bud']} — 01-Cycle 워크북과 같은 Kc"),
     ]
     if gaps or (dropped is not None and len(dropped)):
@@ -791,8 +918,12 @@ def sheet_summary(wb, res, db_rows, c3_rows, groups, chart_rows):
         info.append(("비교 격자", f"{', '.join(res['compare']['check']['location'])} — 같은 관측·계수·Kc로 계산해 격자비교 시트에 정리"))
     r = 4
     for k, v in info:
-        C(ws, r, 1, k, left=True, fill=LIGHT, bold=True); C(ws, r, 2, v, left=True)
-        ws.merge_cells(start_row=r, start_column=2, end_row=r, end_column=14); r += 1
+        C(ws, r, 1, k, left=True, fill=LIGHT, bold=True); x = C(ws, r, 2, v, left=True, wrap=True)
+        ws.merge_cells(start_row=r, start_column=2, end_row=r, end_column=14)
+        lines = max(1, -(-_disp_width(v) // 150))       # 병합 칸은 자동 맞춤이 안 되므로 줄 수만큼 높이를 직접 정함
+        if lines > 1:
+            ws.row_dimensions[r].height = 14.5 * lines
+        r += 1
     r += 1
     # 합격 기준 (수정 가능)
     T(ws, r, 1, "H2 합격 기준 (노란 칸 수정 가능, 2026-09-29 확정값)", 11, True, GREEN); r += 1
@@ -812,14 +943,18 @@ def sheet_summary(wb, res, db_rows, c3_rows, groups, chart_rows):
         verdict_rows[rn] = r; r += 1
     overall_row = r; r += 2
     # 선행시간별 ETo 지표
-    T(ws, r, 1, "선행시간별 예보 ETo 성능 (S3, mm/일) — 모든 값은 일별비교 시트를 참조하는 수식", 11, True, GREEN); r += 1
+    T(ws, r, 1, f"선행시간별 예보 ETo 성능 (★ {main}, mm/일) — 모든 값은 일별비교 시트를 참조하는 수식", 11, True, GREEN); r += 1
     met_hdr = ["", "구분", "선행일", "n", "관측 평균", "예보 평균", "MBE", "RMSE", "R²", "지속성 RMSE", "개선율(지속성)",
                "7일평균 RMSE", "개선율(7일평균)", "H2 판정 대상"]
     eto_first = r + 1
-    rows_eto = _metric_table(ws, r, met_hdr, groups, db, "Y", "AA", "AD", "AF", "AG")
+    rows_eto = _metric_table(ws, r, met_hdr, groups, db, DB["eto"], DB["eo"], DB["err"], DB["xp"], DB["x7"])
     r = rows_eto[-1] + 2
+    if main == "S4":
+        T(ws, r, 1, "Rs 추정 방법 비교 — 같은 대상일, 예보 ETo RMSE (mm/일)와 지속성 대비 개선율. "
+                    "S4 = 하늘상태 반영(★), S3 = 식(50)+강수유무(2025 계수), S1 = 식(50) kRs 0.16", 11, True, GREEN); r += 1
+        r = _method_table(ws, r, groups, db) + 1
     T(ws, r, 1, "선행시간별 예보 ETc (Kc × ETo, mm/일)", 11, True, GREEN); r += 1
-    rows_etc = _metric_table(ws, r, met_hdr, groups, db, "AI", "AJ", "AM", "AN", "AO")
+    rows_etc = _metric_table(ws, r, met_hdr, groups, db, DB["etc"], DB["etco"], DB["xetc"], DB["xetcp"], DB["xetc7"])
     r = rows_etc[-1] + 2
     lead_row = {g: rr for g, rr in zip(groups, rows_eto)}
     for rn, vr in verdict_rows.items():
@@ -892,7 +1027,7 @@ def sheet_summary(wb, res, db_rows, c3_rows, groups, chart_rows):
     bar = BarChart(); bar.type = "col"; bar.grouping = "clustered"
     bar.title = "선행시간별 RMSE (ETo, mm/일)"; bar.y_axis.title = "RMSE (mm/일)"
     cats = Reference(ws, min_col=1, min_row=rows_eto[0], max_row=rows_eto[-1])
-    for col, name, color in ((8, "예보(S3)", GREEN), (10, "지속성", BROWN), (12, "7일평균", "9AA39A")):
+    for col, name, color in ((8, f"예보({main})", GREEN), (10, "지속성", BROWN), (12, "7일평균", "9AA39A")):
         bar.add_data(Reference(ws, min_col=col, min_row=rows_eto[0], max_row=rows_eto[-1]), titles_from_data=False)
         srs = bar.series[-1]; srs.tx = SeriesLabel(v=name)
         srs.graphicalProperties.solidFill = color; srs.graphicalProperties.line.solidFill = color
@@ -913,14 +1048,39 @@ def sheet_summary(wb, res, db_rows, c3_rows, groups, chart_rows):
     return ws
 
 
+def _method_table(ws, r, groups, db):
+    """방법 비교 표(수식): 발표 × 선행일별 RMSE(S4·S3·S1), 개선율, S4 − S3. 반환: 다음 빈 행"""
+    hdr = ["", "구분", "선행일", "n", "RMSE S4 ★", "RMSE S3", "RMSE S1", "S4 − S3", "개선율 S4", "개선율 S3",
+           "MBE S4", "MBE S3"]
+    for j, h in enumerate(hdr, 1):
+        if h:
+            H(ws, r, j, h, size=9)
+    r += 1
+    r0 = r
+    for rn, k in groups:
+        m = f"({db(DB['rn'])}=$B{r})*({db(DB['k'])}=$C{r})"
+        rm = lambda key: f"SQRT(SUMPRODUCT({m}*{db(DB[key])}^2)/$D{r})"
+        C(ws, r, 1, f"{rn} D+{k}", fill=LIGHT); C(ws, r, 2, rn); C(ws, r, 3, k)
+        C(ws, r, 4, f"=SUMPRODUCT({m})", "0")
+        C(ws, r, 5, f"={rm('x4')}", F2); C(ws, r, 6, f"={rm('x3')}", F2); C(ws, r, 7, f"={rm('x1')}", F2)
+        C(ws, r, 8, f"=E{r}-F{r}", "+0.00;-0.00;0.00")
+        C(ws, r, 9, f"=1-E{r}/{rm('xp')}", PCT); C(ws, r, 10, f"=1-F{r}/{rm('xp')}", PCT)
+        C(ws, r, 11, f"=SUMPRODUCT({m}*{db(DB['x4'])})/$D{r}", F2)
+        C(ws, r, 12, f"=SUMPRODUCT({m}*{db(DB['x3'])})/$D{r}", F2)
+        r += 1
+    ws.conditional_formatting.add(f"H{r0}:H{r - 1}", FormulaRule(formula=[f"H{r0}<0"], fill=PatternFill("solid", fgColor=PASS_FILL)))
+    ws.conditional_formatting.add(f"H{r0}:H{r - 1}", FormulaRule(formula=[f"H{r0}>0"], fill=PatternFill("solid", fgColor=FAIL_FILL)))
+    return r
+
+
 def _metric_table(ws, r, hdr, groups, db, fcol, ocol, ecol, pcol, mcol):
     for j, h in enumerate(hdr, 1):
         if h: H(ws, r, j, h, size=9)
     r += 1
     rows = []
     for rn, k in groups:
-        crit = f'{db("B")},$B{r},{db("E")},$C{r}'
-        m = f"({db('B')}=$B{r})*({db('E')}=$C{r})"
+        crit = f'{db(DB["rn"])},$B{r},{db(DB["k"])},$C{r}'
+        m = f"({db(DB['rn'])}=$B{r})*({db(DB['k'])}=$C{r})"
         f, o = db(fcol), db(ocol)
         C(ws, r, 1, f"{rn} D+{k}", fill=LIGHT)
         C(ws, r, 2, rn); C(ws, r, 3, k)
@@ -952,18 +1112,27 @@ def sheet_method(wb, res):
     ws = wb.create_sheet("방법")
     T(ws, 1, 1, "방법과 정의 (근거: docs/THEORY.md 9장, 설계: docs/ARCHITECTURE.md 7장)", 12, True, GREEN)
     items = [
-        ("자료", "예보", "기상자료개방포털 '단기예보(격자)' 과거자료 CSV. 요소 TMX·TMN·TMP·REH·WSD·PCP. 발표일시 = CSV의 UTC 일·시 + 9시간."),
+        ("자료", "예보", "기상자료개방포털 '단기예보(격자)' 과거자료 CSV. 필수 요소 TMX·TMN·TMP·REH·WSD·PCP, 선택 요소 SKY(하늘상태)·POP(강수확률). "
+                        "발표일시 = CSV의 UTC 일·시 + 9시간. 여러 달을 한 파일로 받으면 'Start : YYYYMMDD' 행마다 연월을 바꿔 읽음."),
         ("", "관측", "ASOS 일자료(01-Cycle cropwater_station.py 출력 워크북 원데이터 시트). 관측 ETo는 01-Cycle 계산과정 시트와 같은 식."),
         ("서비스", "발표", "아침 02시 발표 → 오늘(D+0)~D+3, 저녁 17시 발표 → 내일(D+1)~D+4. 검증에는 이 두 발표만 사용(다른 발표를 섞으면 성능이 부풀려짐)."),
         ("일 입력", "Tmax·Tmin", "해당 발표의 TMX(낮최고 09:01~18:00)·TMN(아침최저 03:01~09:00). ASOS 일최고·최저(0~24시)와 정의가 다름."),
         ("", "ea", "시간별 e°(TMP) × REH/100 의 일평균 (ASOS 평균증기압과 같은 개념)."),
         ("", "u2", "WSD 일평균(10 m) × 4.87/ln(67.8×10−5.42) = 0.748 × u10  [식47]"),
         ("", "강수", "PCP 일합계. 기준(설정, 1 mm) 이상이면 강수유무 1."),
+        ("", "하늘상태", "SKY 코드 1 맑음·3 구름많음·4 흐림(그 밖의 값은 결측). 시각마다 태양고도의 사인값(밤 0)으로 가중해 낮 시간의 "
+                      "구름많음 비율·흐림 비율(0~1)을 만듦 = 일사가 많은 한낮의 하늘상태가 더 크게 반영됨. 서비스 발표 자체에 SKY가 없으면 비워 둠. "
+                      "강수확률(POP)은 같은 가중의 낮 평균(참고 값, Rs 추정에는 쓰지 않음)."),
         ("", "지나간 시각 채움", "포털 과거자료는 발표 6시간 뒤부터 들어 있음(02시 발표 → 08시부터). 발표 시점에 이미 지난 시각은 그 이전의 가장 최근 발표 값으로 채움 → 아침 D+0의 00~07시 = 전날 17·20·23시 발표. (API는 발표 1시간 뒤부터 제공되므로 운영에서는 00~02시만 채움)"),
-        ("", "결측", "값이 ±900 이상(예: −999.9)이면 결측. 6요소 중 하나라도 없는 서비스 발표는 통째로 제외(다른 발표로 대신하지 않음). 대상일 관측이 없는 행도 제외. 3일 누적은 첫 3개 대상일이 모두 있을 때만."),
+        ("", "결측", "값이 ±900 이상(예: −999.9)이면 결측. 필수 6요소 중 하나라도 없는 서비스 발표는 통째로 제외(다른 발표로 대신하지 않음). "
+                    "주 방법이 S4면 하늘상태가 없는 행, 그리고 대상일 관측이 없는 행도 제외. 3일 누적은 첫 3개 대상일이 모두 있을 때만."),
         ("", "마지막 날", "아침 D+3·저녁 D+4는 00시(1시간) + 03~21시(3시간 간격) 8개 시각. 풍속·강수는 코드값 → WSD 1: 같은 발표 직전 정량일 평균(최대 3.9), 2: 6.5, 3: 11 m/s / PCP 1: 1.5, 2: 9, 3: 20 mm/h × 3시간."),
         ("예보 ETo", "PM", "FAO-56 식(6), G = 0. 기압은 식(7) 고도 추정. Ra·Rso는 지점 위도·고도로 계산."),
-        ("", "Rs", "S3: Rs/Ra = a + b√(Tmax−Tmin) + c·강수유무, [0.05Ra, Rso]로 제한. 계수는 검증 연도와 겹치지 않는 해(2025)의 관측으로 결정. 비교용 S1: kRs 0.16."),
+        ("", "Rs", ("S4(★): Rs/Ra = a + b√(Tmax−Tmin) + c·강수유무 + d·구름많음 비율 + e·흐림 비율, [0.05Ra, Rso]로 제한. "
+                    "계수는 선행일별로 '예보 입력 → 관측 Rs' 최소제곱. 검증은 월 단위 교차검증(대상월을 뺀 나머지 달로 맞춘 계수, SKY계수 시트). "
+                    "비교용 S3: Rs/Ra = a + b√(Tmax−Tmin) + c·강수유무, 2025년 관측으로 정한 계수. S1: kRs 0.16.")
+                   if res.get("main") == "S4" else
+                   "S3: Rs/Ra = a + b√(Tmax−Tmin) + c·강수유무, [0.05Ra, Rso]로 제한. 계수는 검증 연도와 겹치지 않는 해(2025)의 관측으로 결정. 비교용 S1: kRs 0.16."),
         ("ETc", "Kc", "01-Cycle 워크북과 같은 Kc(시나리오 표값 + 식62·65 현지기상 보정, 식66 선형 보간). 예보·관측·기준선 모두 대상일 Kc를 곱함."),
         ("기준선", "지속성", "발표일 전날(가장 최근의 완결된 관측일) 관측 ETo를 모든 선행일에 사용. 02시에는 전날 자료가 아직 공개 전일 수 있어 실제 운영보다 기준선에 유리한 가정(판정에 보수적)."),
         ("", "7일평균", "발표일 전 7일(D−7~D−1) 관측 ETo 평균."),
@@ -1010,24 +1179,27 @@ def build_verify_workbook(res, out):
     sheet_rscoef(wb, res, obs_rows)
     _, obs_rows2 = sheet_obs(wb, obs)
     assert obs_rows2 == obs_rows
-    _, db_rows, run_ids = sheet_daily(wb, df, obs_rows)
+    main = res.get("main", "S3")
+    if main == "S4":
+        sheet_skycoef(wb, res)               # 일별비교의 S4 수식이 이 시트의 계수 범위를 참조
+    _, db_rows, run_ids = sheet_daily(wb, df, obs_rows, sky=(main == "S4"))
     _, c3_rows = sheet_cum3(wb, df, db_rows, run_ids, res.get("cum3_runs"))
-    sheet_diag(wb, db_rows, groups)
+    sheet_diag(wb, db_rows, groups, main)
     sheet_attr(wb, res)
     if res.get("grid_cmp"):
         sheet_grid_compare(wb, res)
     _, chart_rows = sheet_chartdata(wb, df, db_rows, obs_rows)
     sheet_summary(wb, res, db_rows, c3_rows, groups, chart_rows)
-    sheet_month(wb, df, db_rows)            # 요약 시트의 합격 기준 셀을 참조하므로 요약 다음에 만든다
+    sheet_month(wb, df, db_rows, main)      # 요약 시트의 합격 기준 셀을 참조하므로 요약 다음에 만든다
     sheet_method(wb, res)
     order = ["요약", "일별비교", "3일누적", "월별", "입력진단", "오차분해"] + (["격자비교"] if res.get("grid_cmp") else []) + \
-            ["Rs계수", "관측", "설정", "방법", "차트자료"]
+            ["Rs계수"] + (["SKY계수"] if main == "S4" else []) + ["관측", "설정", "방법", "차트자료"]
     wb._sheets = [wb[n] for n in order]
-    for n in ("요약", "Rs계수", "설정", "방법", "오차분해", "입력진단", "3일누적", "월별", "격자비교"):
+    for n in ("요약", "Rs계수", "SKY계수", "설정", "방법", "오차분해", "입력진단", "3일누적", "월별", "격자비교"):
         if n in wb.sheetnames:
             wb[n].sheet_view.showGridLines = False
     wb["요약"].sheet_properties.tabColor = GREEN
-    for n in [x for x in ("요약", "월별", "Rs계수", "입력진단", "오차분해", "격자비교", "방법", "설정") if x in wb.sheetnames]:
+    for n in [x for x in ("요약", "월별", "Rs계수", "SKY계수", "입력진단", "오차분해", "격자비교", "방법", "설정") if x in wb.sheetnames]:
         w = wb[n]; w.page_setup.orientation = "landscape"; w.page_setup.fitToWidth = 1; w.page_setup.fitToHeight = 0
         w.sheet_properties.pageSetUpPr.fitToPage = True
     return safe_save(wb, out)

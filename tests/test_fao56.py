@@ -4,7 +4,7 @@ tests/test_fao56.py — FAO-56 핵심 계산 단위 테스트
 검증 기준:
   - FAO-56 식(11) svp, 식(21) Ra, 식(47) wind_2m
   - FAO-56 식(6) ETo Penman-Monteith
-  - FAO-56 식(82)(83)(84)(88) TAW·RAW·Ks·DP 물수지
+  - FAO-56 식(82)(83)(84)(85)(88) TAW·RAW·Ks·DP 물수지 (식88은 FAO-56 원식: 당일 ETc를 뺌)
   - FAO-56 그림(25) Kc 생육단계 보간
   - 실증값: 춘천(ASOS 101) 2026-04-01 실측 기반
 
@@ -147,13 +147,28 @@ class TestWaterBalance:
              else max(0.0, (self.TAW - Dr) / (self.TAW - self.RAW))
         assert abs(Ks - expected_Ks) < ABS_TOL_KS
 
-    def test_dp_excess_rain(self):
-        """DP = max(P − Dr, 0): 강수 50mm, Dr=20mm → DP=30mm  [식(88)]"""
-        assert abs(max(50.0 - 20.0, 0) - 30.0) < 0.01
+    def _wb(self, rain, eto):
+        from cropwater_multi import compute_water_balance
+        recs = [dict(date=f"2026-05-{i + 1:02d}", rain=p, PM=e) for i, (p, e) in enumerate(zip(rain, eto))]
+        return compute_water_balance(recs, self.TAW, self.RAW)
 
-    def test_dp_small_rain(self):
+    def test_dp_eq88_subtracts_same_day_etc(self):
+        """[식(88) FAO-56 원식] DP = P − ETc − Dr,i-1: Dr 20mm에 비 50mm, ETc 5mm → DP 25mm, Dr 0"""
+        r = self._wb([0, 0, 0, 0, 50], [5, 5, 5, 5, 5])
+        assert r[3]["Dr"] == pytest.approx(20.0)
+        assert r[4]["DP"] == pytest.approx(25.0)      # 간이식 max(P − Dr, 0)이면 30
+        assert r[4]["Dr"] == pytest.approx(0.0)       # 간이식이면 ETc만큼(5) 남음
+        assert r[4]["Peff"] == pytest.approx(25.0)
+
+    def test_dp_zero_when_rain_within_deficit_plus_etc(self):
+        """비가 고갈량 + 당일 ETc보다 적으면 DP = 0, Dr = Dr,i-1 − P + ETc = 20 − 22 + 5 = 3"""
+        r = self._wb([0, 0, 0, 0, 22], [5, 5, 5, 5, 5])
+        assert r[4]["DP"] == 0.0 and r[4]["Dr"] == pytest.approx(3.0)
+
+    def test_small_rain_below_deficit(self):
         """강수 < 고갈량이면 DP = 0"""
-        assert max(10.0 - 40.0, 0) == 0.0
+        r = self._wb([0, 0, 0, 0, 10], [5, 5, 5, 5, 5])
+        assert r[4]["DP"] == 0.0 and r[4]["Dr"] == pytest.approx(15.0)
 
     def test_dr_lower_bound(self):
         """Dr은 0 미만이 될 수 없음"""

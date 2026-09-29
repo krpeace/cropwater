@@ -159,7 +159,8 @@ def test_lead_metrics_and_verdict():
     for rn, ks in (("아침", (0, 1, 2, 3)), ("저녁", (1, 2, 3, 4))):
         for k in ks:
             for i, v in enumerate(o):
-                rows.append(dict(run_name=rn, lead_day=k, ETo_obs=v, ETo_S3=v + 0.5, ETo_pers=v + (1.0 if i % 2 else -1.0),
+                rows.append(dict(run_name=rn, lead_day=k, ETo_obs=v, ETo_S3=v + 0.5, ETo_main=v + 0.5,
+                                 ETo_pers=v + (1.0 if i % 2 else -1.0),
                                  ETo_7d=v + 0.8))
     met = lead_metrics(pd.DataFrame(rows))
     r = met.iloc[1]
@@ -199,10 +200,10 @@ def test_grid_comparison_direct_difference():
                 o = 4 + rng.normal()
                 rows.append(dict(run=run, run_name=rn, lead_day=k, target=run.normalize() + pd.Timedelta(days=k),
                                  Tmax=25 + rng.normal(), Tmin=12.0, Tmax_obs=26.0, Tmin_obs=12.0, ea=1.2, ea_obs=1.2,
-                                 u10=1.5, u10_obs=1.8, Rs_S3=18.0, Rs_obs=19.0, rain=0.0, rain_flag=0, flag_obs=0,
-                                 ETo_S3=o - 0.2, ETo_obs=o, ETo_pers=o + 1.0, ETo_7d=o + 0.8))
+                                 u10=1.5, u10_obs=1.8, Rs_S3=18.0, Rs_main=18.0, Rs_obs=19.0, rain=0.0, rain_flag=0,
+                                 flag_obs=0, ETo_S3=o - 0.2, ETo_main=o - 0.2, ETo_obs=o, ETo_pers=o + 1.0, ETo_7d=o + 0.8))
     a = pd.DataFrame(rows)
-    b = a.assign(Tmax=a.Tmax - 1.0, ETo_S3=a.ETo_S3 - 0.1)
+    b = a.assign(Tmax=a.Tmax - 1.0, ETo_S3=a.ETo_S3 - 0.1, ETo_main=a.ETo_main - 0.1)
     gc = grid_comparison(a, b)
     d = gc["diff"].set_index("item")["mean"]
     assert d["최고기온 (℃)"] == pytest.approx(1.0) and d["예보 ETo (mm/일)"] == pytest.approx(0.1)
@@ -265,10 +266,10 @@ def _month_df(err_apr=0.5, err_may=-1.0):
                 t = day + pd.Timedelta(days=k)
                 o = 3.0 + (t.day % 3)
                 e = err_apr if t.month == 4 else err_may
-                rows.append(dict(run=run, run_date=day, run_name=rn, lead_day=k, target=t, ETo_obs=o, ETo_S3=o + e,
+                rows.append(dict(run=run, run_date=day, run_name=rn, lead_day=k, target=t, ETo_obs=o, ETo_S3=o + e, ETo_main=o + e,
                                  ETo_pers=o + (1.0 if t.day % 2 else -1.0), ETo_7d=o + 0.8,
                                  Tmax=24.5, Tmax_obs=25.0, Tmin=12.3, Tmin_obs=12.0, ea=1.2, ea_obs=1.1, u10=1.5, u10_obs=2.0,
-                                 Rs_S3=17.0, Rs_obs=19.0, rain_flag=int(t.day % 4 == 0), flag_obs=0))
+                                 Rs_S3=17.0, Rs_main=17.0, Rs_obs=19.0, rain_flag=int(t.day % 4 == 0), flag_obs=0))
     df = pd.DataFrame(rows)
     return df[df.target.dt.month.isin([4, 5])].reset_index(drop=True)
 
@@ -323,3 +324,113 @@ def test_wrap_text_display_width():
     parts = _wrap_text(s, 60)
     assert all(_disp_width(p) <= 60 for p in parts) and len(parts) > 1
     assert " ".join(p.strip() for p in parts) == s
+
+
+# ── 하늘상태(SKY)·강수확률(POP): 여러 달 파일, 판별, 낮 시간 가중, S4 ──────────────
+def test_read_multi_month_file_updates_month_at_start_lines(tmp_path):
+    p = tmp_path / "sky.csv"
+    p.write_text(" format: day(UTC),hour(UTC),forecast,value,day(KST),hour(KST)  location:73_134 Start : 20260430\n"
+                 "30,2300,+6,1.0,31,0800\nStart : 20260501\n1,0200,+6,3.0,1,1100\n1,1700,+6,4.0,2,0200\n", encoding="utf-8")
+    _, df = read_portal_csv(p)
+    assert list(df["issue"]) == [TS("2026-05-01 08:00"), TS("2026-05-01 11:00"), TS("2026-05-02 02:00")]
+
+
+def test_detect_sky_and_pop_and_filter_invalid_sky(tmp_path):
+    iss = [TS("2026-06-01 02:00") + pd.Timedelta(hours=3 * (i // 60)) for i in range(600)]
+    rng = np.random.default_rng(2)
+    sky = pd.DataFrame({"issue": iss, "forecast": [6 + i % 60 for i in range(600)],
+                        "value": rng.choice([1.0, 3.0, 4.0], 600)})
+    assert detect_element("x.csv", sky) == "SKY"
+    pop = sky.assign(value=rng.choice([0.0, 0.0, 10.0, 20.0, 30.0, 60.0, 80.0], 600))
+    assert detect_element("x.csv", pop) == "POP"               # 10% 단위·0 포함 → 습도(5% 단위)가 아님
+    reh = sky.assign(value=rng.choice([55.0, 60.0, 65.0, 70.0, 85.0, 95.0], 600))
+    assert detect_element("x.csv", reh) == "REH"
+    p = tmp_path / "하늘상태.csv"
+    p.write_text(" format: day(UTC),hour(UTC),forecast,value,day(KST),hour(KST)  location:73_134 Start : 20260601\n"
+                 "1,0200,+6,3.0,1,1100\n1,0200,+7,0.0,1,1100\n1,0200,+8,4.0,1,1100\n", encoding="utf-8")
+    a = Archive(); e = a.add_file(str(p))
+    assert e == "SKY" and len(a.hourly["SKY"]) == 2 and a.n_missing["SKY"] == 1   # 코드표에 없는 0은 결측
+
+
+def test_sun_weights_daytime_shape():
+    from fcst_archive import sun_weights
+    t = pd.date_range("2026-06-21 00:00", periods=24, freq="h")
+    w = sun_weights(t, 37.9, 127.74)
+    assert w[0] == 0 and w[23] == 0 and w[12] > w[9] > w[7] > 0          # 태양시 정오 ≈ 12:30
+    assert abs(w[12] - w[13]) < 0.02
+    w0 = sun_weights(t)                                                  # 위도 없으면 06~18시 같은 가중치
+    assert w0.sum() == 13 and w0[5] == 0 and w0[6] == 1
+
+
+def test_daily_inputs_sky_fractions_and_optional_completeness():
+    a, run = _archive()
+    lead = a.hourly["TMP"][a.hourly["TMP"].issue == run].lead.tolist()
+    t = [run + pd.Timedelta(hours=h) for h in lead]
+    val = [4.0 if tt.normalize() == run.normalize() + pd.Timedelta(days=1) else 1.0 for tt in t]   # D+1 종일 흐림
+    a.hourly["SKY"] = _hourly(str(run), lead, val)
+    a.hourly["POP"] = _hourly(str(run), lead, [30.0] * len(lead))
+    out = daily_inputs(a, run, [run.normalize() + pd.Timedelta(days=k) for k in range(4)], 37.9, 127.74).set_index("lead_day")
+    assert out.loc[1, "sky_overcast"] == pytest.approx(1.0) and out.loc[1, "sky_cloudy"] == 0
+    assert out.loc[2, "sky_overcast"] == 0 and out.loc[2, "pop"] == pytest.approx(0.30)
+    # 선택 요소가 없는 발표는 필수 6요소만으로 완전 발표로 본다
+    assert run in a.complete_issues
+
+
+def test_rs_s4_fit_recovers_and_per_row_coefficients():
+    from rs_model import fit_s4, rs_s4
+    rng = np.random.default_rng(5)
+    n = 200
+    tx = 20 + 8 * rng.random(n); tn = tx - (4 + 10 * rng.random(n)); fl = (rng.random(n) < 0.3).astype(float)
+    cl, ov = rng.random(n) * 0.5, rng.random(n) * 0.5
+    ra = 30 + 10 * rng.random(n)
+    co = np.array([0.25, 0.11, -0.05, -0.09, -0.23])
+    rs = (co[0] + co[1] * np.sqrt(tx - tn) + co[2] * fl + co[3] * cl + co[4] * ov) * ra
+    assert fit_s4(tx, tn, fl, cl, ov, ra, rs) == pytest.approx(co, abs=1e-9)
+    rso = ra * 0.76
+    one = rs_s4(tx, tn, fl, cl, ov, ra, rso, co)
+    per_row = rs_s4(tx, tn, fl, cl, ov, ra, rso, np.tile(co, (n, 1)))
+    assert np.allclose(one, per_row) and (one <= rso + 1e-12).all()
+
+
+def test_s4_cv_excludes_own_month():
+    from cropwater_fcst import s4_cv
+    rng = np.random.default_rng(7)
+    rows = []
+    for day in pd.date_range("2026-04-01", "2026-06-30"):
+        for k in (1, 2):
+            tx = 22 + 6 * rng.random(); tn = tx - 8 - 4 * rng.random()
+            cl, ov = 0.5 * rng.random(), 0.5 * rng.random()
+            rows.append(dict(target=day, lead_day=k, Tmax=tx, Tmin=tn, rain_flag=float(rng.random() < 0.2),
+                             sky_cloudy=cl, sky_overcast=ov, Ra=38.0, Rso=29.0,
+                             Rs_obs=(0.25 + 0.11 * np.sqrt(tx - tn) - 0.1 * ov) * 38.0 + rng.normal()))
+    df = pd.DataFrame(rows)
+    co, tab = s4_cv(df)
+    assert set(tab.fold) == {"2026-04", "2026-05", "2026-06"} and set(tab.lead_day) == {1, 2}
+    df2 = df.copy()
+    df2.loc[df2.target.dt.month == 5, "Rs_obs"] += 5.0          # 5월 관측을 바꿔도
+    co2, _ = s4_cv(df2)
+    may = (df.target.dt.month == 5).values
+    assert np.allclose(co[may], co2[may])                       # 5월 행의 계수는 그대로(5월 자료를 쓰지 않음)
+    assert not np.allclose(co[~may], co2[~may])                 # 다른 달 계수는 5월 자료를 씀
+
+
+def test_daily_layout_backward_compatible_letters():
+    from fcst_report import daily_layout
+    from openpyxl.utils import get_column_letter as CL
+    col = {k: CL(i) for i, (k, _, _) in enumerate(daily_layout(False), 1)}
+    assert (col["flag"], col["rs3"], col["e3"], col["eo"], col["x3"], col["kc"], col["etc"], col["drs"], col["judge"]) == \
+           ("O", "R", "Y", "AA", "AD", "AH", "AI", "BA", "BB")          # 하늘상태가 없으면 이전 배치와 같음
+    keys = [k for k, _, _ in daily_layout(True)]
+    assert {"cld", "ovc", "fold", "krow", "rs4", "e4", "x4", "drs3"} <= set(keys)
+
+
+def test_sky_coef_file_roundtrip(tmp_path):
+    from rs_model import load_sky_coef, save_sky_coef
+    p = tmp_path / "rs_sky_coef.csv"
+    tab = pd.DataFrame([dict(lead_day=k, a=0.2 + k / 100, b=0.1, c=-0.05 * k, d=-0.1, e=-0.2, n=100,
+                             fit_start="2026-04-02", fit_end="2026-09-19", rmse_rs=4.5) for k in range(5)])
+    save_sky_coef("101", tab, p, note="시험")
+    save_sky_coef("216", tab.assign(a=0.3), p)
+    c = load_sky_coef("101", p)
+    assert sorted(c) == [0, 1, 2, 3, 4] and c[2] == pytest.approx((0.22, 0.1, -0.1, -0.1, -0.2))
+    assert load_sky_coef("216", p)[0][0] == pytest.approx(0.3) and load_sky_coef("999", p) == {}
