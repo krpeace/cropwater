@@ -44,6 +44,7 @@
 | **다지점 일괄 분석** | 30개 이상 지점 동시 계산 및 관수 필요 달력(히트맵) 시각화 |
 | **지점 메타 자동화** | 기상청 API 연동, 위도·고도·풍속계 높이 자동 수집 및 로컬 캐싱 |
 | **51개 작물 라이브러리** | FAO-56 표준 파라미터(Kc·Zr·p) 내장 (`crops_library.csv`) |
+| **단기예보 ETo·ETc 예측** (02-Cycle, 검증 중) | 기상청 단기예보(아침 02시 → 오늘~D+3, 저녁 17시 → 내일~D+4)로 ETo·ETc 예측, 일사는 식(50)+강수유무로 추정, 과거 예보로 선행시간별 검증 |
 
 ---
 
@@ -116,6 +117,29 @@ python cropwater_multi.py --stns 101,119,131,146,156,136,216 --start 20260401 --
 | `--fc` / `--wp` | 포장용수량 / 위조점 (m³/m³) | `0.22` / `0.10` (양토) |
 | `--pdep` | 고갈계수 p | `0.40` |
 
+---
+
+### cropwater_fcst.py — 단기예보 ETo·ETc 예측 검증 (02-Cycle)
+
+```bash
+# Rs 계수 보정: 검증 연도와 다른 해의 cropwater_station.py 출력 워크북 → rs_coef.csv
+python cropwater_fcst.py calib --obs output/eto101_apple_20250101_20251231.xlsx --stn 101
+
+# H2 검증: 기상자료개방포털 과거 단기예보 CSV 폴더 + 검증 연도 워크북 → 검증 엑셀
+python cropwater_fcst.py verify --fcst data/fcst_101 --obs output/eto101_apple_20260101_20260928.xlsx --stn 101
+```
+
+| 파라미터 | 설명 |
+| :--- | :--- |
+| `--fcst` | 과거 단기예보 CSV 폴더 또는 파일들 (TMX·TMN·TMP·REH·WSD·PCP) |
+| `--obs` | `cropwater_station.py` 출력 워크북 (관측 기준값·Kc 설정). 첫 발표 7일 전부터 포함 |
+| `--stn` | ASOS 지점 번호 (rs_coef.csv 행 선택) |
+| `--coef` / `--out` | 계수 파일(기본 `rs_coef.csv`) / 출력 파일명 |
+
+> 가설·합격 기준·게이트 판정은 [docs/VALIDATION.md](docs/VALIDATION.md), 이론은 [THEORY.md 9장](docs/THEORY.md)에 있습니다.
+
+---
+
 **주요 ASOS 지점 번호**
 
 | 번호 | 지점 | 번호 | 지점 | 번호 | 지점 |
@@ -149,6 +173,17 @@ python cropwater_multi.py --stns 101,119,131,146,156,136,216 --start 20260401 --
 | **월별_물수지** | 지점 × 월 교차 집계 |
 | **관수필요_달력** | Dr 히트맵 (흰→연녹→연노→진적) + Dr 선형 차트 |
 | **설명** | 계산 방법·파라미터 |
+
+### cropwater_fcst.py verify (10시트)
+
+| 시트 | 내용 |
+| :--- | :--- |
+| **요약** | H2 합격 기준(노란 셀)·판정, 선행시간별 ETo·ETc 지표, 3일 누적, 주요 발견, 차트 |
+| **일별비교** | 발표 × 대상일 예보 입력·Rs·PM ETo·기준선·ETc·입력 오차 (라이브 수식) |
+| **3일누적 / 입력진단** | 발표별 3일 합 오차 / 입력 편향·강수 적중 |
+| **오차분해** | 입력 교체 오차 분해, 편향 보정 탐색 (Python 계산값) |
+| **Rs계수 / 관측 / 설정** | Rs 계수·H1 재검증 / ASOS 관측 ETo·Kc / 지점·예보·Kc 설정 |
+| **방법 / 차트자료** | 정의·규칙·한계 / 차트 원본 |
 
 📖 자세한 해석 방법 → [docs/RESULTS_GUIDE.md](docs/RESULTS_GUIDE.md)
 
@@ -188,14 +223,22 @@ cropwater/
 ├── cropwater_station.py        ← 단일 지점 분석 → 6시트 Excel
 ├── cropwater_multi.py          ← 다지점 비교 → 히트맵 + 차트
 │
+├── cropwater_fcst.py           ← (02-Cycle) 단기예보 ETo·ETc 예측 검증 CLI: calib / verify
+├── fcst_archive.py             ← 과거 단기예보 CSV 파싱 → 발표별 일 입력
+├── rs_model.py                 ← 일사량(Rs) 추정: 식(50) + 강수유무 보정, 계수 적합
+├── obs_daily.py                ← cropwater_station 워크북 → 관측 ETo·Kc
+├── fcst_report.py              ← 검증 엑셀 (10시트, 라이브 수식)
+│
 ├── crops_library.csv           ← 51개 작물 Kc·Zr·p (FAO-56 Table 12·22)
 ├── stations_backup.csv         ← ASOS 지점 메타 캐시
+├── rs_coef.csv                 ← Rs 추정 계수 (FAO 기본값 + 지점 보정값)
 │
 ├── output/                     ← 분석 결과물 저장 폴더 (.gitignore로 xlsx 제외)
 │   └── .gitkeep
 │
 ├── tests/
-│   └── test_fao56.py           ← FAO-56 핵심 계산 단위 테스트 (pytest)
+│   ├── test_fao56.py           ← FAO-56 핵심 계산 단위 테스트 (pytest)
+│   └── test_fcst.py            ← 02-Cycle 예보 모듈 단위 테스트
 │
 └── docs/
     ├── THEORY.md               ← 관수·토양학 이론 (농대생 입문용)

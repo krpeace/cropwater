@@ -29,19 +29,28 @@ cropwater/
 ├── cropwater_station.py   ← 단일 지점 심층 분석
 │     └── build_workbook() → 6시트 Excel
 │
-└── cropwater_multi.py     ← 다지점 스크리닝
-      ├── compute_station()        → ETo·Epan
-      ├── compute_water_balance()  → Dr/Ks/DP
-      ├── aggregate_monthly()      → 월별 집계
-      └── build_calendar_sheet()  → 히트맵 + 차트
+├── cropwater_multi.py     ← 다지점 스크리닝
+│     ├── compute_station()        → ETo·Epan
+│     ├── compute_water_balance()  → Dr/Ks/DP
+│     ├── aggregate_monthly()      → 월별 집계
+│     └── build_calendar_sheet()  → 히트맵 + 차트
+│
+└── (02-Cycle) 단기예보 ETo·ETc 예측 — 7장
+      ├── cropwater_fcst.py  ← CLI: calib(Rs 계수) / verify(H2 검증 엑셀)
+      ├── fcst_archive.py    ← 과거 단기예보 CSV 파싱 → 발표별 일 입력
+      ├── rs_model.py        ← Rs 추정(식50 + 강수유무), rs_coef.csv 2계층
+      ├── obs_daily.py       ← 01-Cycle 워크북 → 관측 ETo·Kc
+      └── fcst_report.py     ← 검증 엑셀(10시트, 라이브 수식)
 ```
 
-**의존 관계** — 두 실행 파일은 서로 독립적이며 `fao56_core`만 공유합니다.
+**의존 관계** — 실행 파일은 서로 독립적이며 `fao56_core`를 공유합니다. 02-Cycle 모듈은 01-Cycle 출력 워크북(관측 기준값)을 입력으로 씁니다.
 
 ```
 cropwater_station ──┐
                     ├──→ fao56_core ──→ requests, openpyxl
-cropwater_multi   ──┘
+cropwater_multi   ──┘        ▲
+                             │
+cropwater_fcst ──→ fcst_archive, rs_model, obs_daily, fcst_report ──→ pandas, numpy, openpyxl
 ```
 
 ---
@@ -352,15 +361,57 @@ Dr_end = min(Dr_after - I_net + ETc_adj, taw)
 
 **입력 대응 (정정)** — TMN/TMX/REH/WSD만으로는 PM을 계산할 수 없습니다. 단기예보에는 **일사량(Rs)이 없으므로** 식(50) + 강수유무 보정으로 추정합니다. 기압은 고도 기반(식7)으로 대체합니다.
 
-**예정 모듈 (단계별 구현 후 이 절을 갱신)**
+**모듈 (G1~G3 구현, 2026-09-29)**
 
-| 모듈 | 역할 | 단계 |
-| :--- | :--- | :---: |
-| `fcst_archive.py` | 기상자료개방포털 과거 단기예보 파일 → (발표일시, 예보일시, 요소, 값) 표준화, 02·17시 발표 추출 | 1 |
-| `rs_model.py` + `rs_coef.csv` | Rs 추정. 계수 2계층: FAO-56 기본값 + 지점 보정값 | 2 |
-| `fcst_daily.py` | 시간 → 일 집계 (TMX/TMN 우선, ea, u2, 강수합·강수유무, 선행시간·완결성 표시) | 3 |
-| `cropwater_fcst.py` | 예보 ETo·ETc·물수지 전망 계산, H2 검증, 엑셀 출력 | 3~4 |
-| `kma_fcst.py` + `kma_grid.py` | 운영용 API 수집(02:10·17:10, 페이징, 원자료 보관, 실패 시 직전 발표 사용), 위경도 → 격자 변환 | 5 |
+| 모듈 | 역할 | 단계 | 상태 |
+| :--- | :--- | :---: | :---: |
+| `fcst_archive.py` | 과거 단기예보 CSV → 요소별 표(발표, 선행시간, 대상시각, 값, 코드 여부) → 서비스 발표(02·17시)별 일 입력. `fcst_daily.py` 계획을 합침 | 1 | 구현 |
+| `rs_model.py` + `rs_coef.csv` | Rs 추정(S1 식50, S3 식50 + 강수유무), 최소제곱 적합, 계수 2계층(stn=0 FAO 기본값 + 지점 행) | 2 | 구현 |
+| `obs_daily.py` | 01-Cycle 출력 워크북 → 관측 일자료, 관측 ETo(01-Cycle 규칙), Kc(설정 시트 값) | 2 | 구현 |
+| `cropwater_fcst.py` | CLI. 예보 ETo·ETc, 기준선, 선행시간별 지표·H2 판정, 입력 진단, 오차 분해, 편향 보정 탐색 | 3 | 구현 |
+| `fcst_report.py` | H2 검증 엑셀 (라이브 수식) | 3 | 구현 |
+| (물수지 전망) | 관측 Dr + 예보 ETc − 예보 유효강수 → 관수 필요 예상일, 서비스용 엑셀 보고서 | 4 | 예정 |
+| `kma_fcst.py` + `kma_grid.py` | 운영용 API 수집(02:10·17:10, 페이징, 원자료 보관, 실패 시 직전 발표 사용), 위경도 → 격자 변환 | 5 | 예정 |
+
+**실행**
+
+```bash
+# 1) Rs 계수 보정 — 검증 연도와 다른 해의 01-Cycle 워크북으로 (rs_coef.csv에 지점 행 기록)
+python cropwater_fcst.py calib --obs output/eto101_apple_20250101_20251231.xlsx --stn 101
+
+# 2) H2 검증 엑셀 — 과거 단기예보 CSV 폴더 + 검증 연도 01-Cycle 워크북
+python cropwater_fcst.py verify --fcst data/fcst_101 --obs output/eto101_apple_20260101_20260928.xlsx --stn 101
+#    → output/fcst_verify(101)_<첫 대상일>_<끝 대상일>.xlsx
+```
+
+- `--fcst`: 요소·월별 CSV 폴더(또는 파일 목록). 요소는 파일명 키워드(최고기온·최저기온·1시간기온·습도·풍속·강수량)로 판별합니다. 키워드가 없으면 값 분포로 판별합니다(TMX/TMN은 발표시각별 대상일 수 패턴).
+- `--obs`: 관측 워크북은 첫 발표 7일 전부터 포함해야 합니다(7일평균 기준선).
+- 예보 원자료(CSV)는 용량이 커서 저장소에 올리지 않습니다.
+
+**처리 흐름 (verify)**
+
+```
+과거 단기예보 CSV ──→ fcst_archive.load_archive()      요소별 (발표, lead, 대상시각, 값, 코드)
+                          │  check_archive()             G1 점검: 격자, 발표 누락, TMX/TMN 행 패턴, 코드값
+                          ▼
+                    service_table()                      아침 02시 → D+0~D+3, 저녁 17시 → D+1~D+4
+                          │  daily_inputs()              대상시각마다 '서비스 발표 이전의 가장 최근 발표' 값
+                          ▼
+01-Cycle 워크북 ──→ obs_daily (관측 ETo·Kc) ──→ cropwater_fcst.forecast_table()
+rs_coef.csv ─────→ rs_model.load_coef()   ──┘   예보 ETo(S3·S1), 관측, 지속성, 7일평균, ETc
+                          │
+                          ├─ lead_metrics() / cum3() / h2_verdict()     선행시간별 지표·3일 누적·판정
+                          ├─ input_diagnostics()                        입력 편향·강수 적중
+                          ├─ error_attribution() / bias_correction_cv() 오차 분해·편향 보정 탐색
+                          ▼
+                    fcst_report.build_verify_workbook()  → 검증 엑셀
+```
+
+**검증 엑셀 (fcst_report.py)** — 시트별 해석은 [RESULTS_GUIDE.md](RESULTS_GUIDE.md)에 있습니다.
+- 값으로 넣는 것: 예보 일 입력(집계값), ASOS 관측 일자료, 오차분해 시트(Python 계산)
+- 수식으로 계산하는 것: Ra·Rs·PM ETo·Kc·ETc·기준선·오차·지표·판정
+- 노란 칸(설정·Rs계수·합격 기준)을 바꾸면 다시 계산됩니다.
+- LibreOffice 재계산 결과가 Python 계산과 1e-14 이내로 일치합니다(G3 점검).
 
 **격자와 읍면동**
 - API는 격자(nx, ny)로 요청합니다.
@@ -391,7 +442,19 @@ Dr_end = min(Dr_after - I_net + ETc_adj, taw)
   - 풍속 WSD: 1 → 같은 발표의 직전 정량일 평균 풍속(최대 3.9 m/s), 2 → 6.5, 3 → 11 m/s
   - 강수 PCP: 1 → 1.5, 2 → 9, 3 → 20 mm/h
   - 가이드의 WSD 코드 1 설명 "4 m/s 이상의 약한 바람"은 "미만"의 오기로 보입니다. 실제 자료로 확인합니다.
-- **오늘(D0):** 02시 발표는 03시부터 예보하므로, 오늘 습도·풍속은 03~23시(21시간) 평균을 씁니다.
+  - 과거자료(2026-04~06, 격자 73_135) 확인 결과: WSD 코드는 1과 2만 나왔습니다. PCP 코드는 0·1·2입니다.
+  - 마지막 날은 00시(1시간 간격) + 03~21시(3시간 간격) 8개 시각입니다. 03시부터 코드값입니다.
+- **발표 시점에 지난 시각 채움:** 대상 시각마다 **서비스 발표 시각 이전(포함)의 가장 최근 발표 값**을 씁니다.
+  - 포털 과거자료는 발표 6시간 뒤부터 있으므로, 아침 D0의 00~07시(8시간)는 전날 17·20·23시 발표 값입니다.
+  - 운영 API는 발표 1시간 뒤부터 있으므로 00~02시만 채웁니다.
+  - G0의 '21시간 평균' 안을 G1에서 이 규칙으로 바꿨습니다([THEORY.md 9장](THEORY.md#9-예보-기반-etoetc--기상청-단기예보)).
+- **과거 예보 CSV 형식 (기상자료개방포털):**
+  - 머리행: `format: day(UTC),hour(UTC),forecast,value,day(KST),hour(KST) location:nx_ny Start : YYYYMMDD`
+  - 발표시각(KST) = 파일 연월 + UTC 일·시 + 9시간
+  - 1시간 요소: 대상시각 = 발표시각 + forecast(h)
+  - 일 요소(TMX·TMN): forecast +6, +7, … = 대상일 순번
+    - TMX: 02·05·08·11시 발표는 오늘부터, 14~23시 발표는 내일부터
+    - TMN: 02시 발표만 오늘부터
 
 ---
 
@@ -399,6 +462,7 @@ Dr_end = min(Dr_after - I_net + ETc_adj, taw)
 
 **라이브 수식 우선**
 `cropwater_station.py`는 Python이 값이 아닌 수식 문자열을 셀에 씁니다. 설정값 변경 시 전체 시트가 자동 재계산되며, 셀 단위로 계산 과정을 추적할 수 있습니다.
+02-Cycle 검증 엑셀(`fcst_report.py`)도 같은 원칙입니다. 입력을 바꿔 PM을 여러 번 다시 풀어야 하는 오차분해 시트만 값으로 넣고, 시트에 그 사실을 적습니다.
 
 **무관수 가정 명시**
 물수지는 자연강우만 반영합니다. 관수가 있었다면 Dr이 실제보다 높게 산출됩니다. 이 한계는 결과요약·물수지 시트 헤더에 명시되어 있습니다.
