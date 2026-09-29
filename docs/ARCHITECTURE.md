@@ -380,12 +380,17 @@ Dr_end = min(Dr_after - I_net + ETc_adj, taw)
 python cropwater_fcst.py calib --obs output/eto101_apple_20250101_20251231.xlsx --stn 101
 
 # 2) H2 검증 엑셀 — 과거 단기예보 CSV 폴더 + 검증 연도 01-Cycle 워크북
-python cropwater_fcst.py verify --fcst data/fcst_101 --obs output/eto101_apple_20260101_20260928.xlsx --stn 101
-#    → output/fcst_verify(101)_<첫 대상일>_<끝 대상일>.xlsx
+python cropwater_fcst.py verify --fcst data/fcst_101_73134 --obs output/eto101_apple_20260101_20260928.xlsx --stn 101
+#    → output/fcst_verify(101)_<격자>_<첫 대상일>_<끝 대상일>.xlsx
+
+# (선택) 다른 격자와 비교 — 같은 관측·계수·Kc로 계산해 '격자비교' 시트 추가
+python cropwater_fcst.py verify --fcst data/fcst_101_73134 --compare data/fcst_101_73135 --obs ... --stn 101
 ```
 
 - `--fcst`: 요소·월별 CSV 폴더(또는 파일 목록). 요소는 파일명 키워드(최고기온·최저기온·1시간기온·습도·풍속·강수량)로 판별합니다. 키워드가 없으면 값 분포로 판별합니다(TMX/TMN은 발표시각별 대상일 수 패턴).
 - `--obs`: 관측 워크북은 첫 발표 7일 전부터 포함해야 합니다(7일평균 기준선).
+- `--compare`: 다른 격자의 과거 예보. 선행시간별 성능·입력 편향과 같은 발표·대상일의 직접 차이를 비교합니다(`grid_comparison()`).
+- 지점의 격자는 `cropwater_fcst.STATIONS`(아래 대표 10개 지점 표)와 비교해, 다르면 요약 시트에 경고를 남깁니다.
 - 예보 원자료(CSV)는 용량이 커서 저장소에 올리지 않습니다.
 
 **처리 흐름 (verify)**
@@ -403,12 +408,13 @@ rs_coef.csv ─────→ rs_model.load_coef()   ──┘   예보 ETo(S3�
                           ├─ lead_metrics() / cum3() / h2_verdict()     선행시간별 지표·3일 누적·판정
                           ├─ input_diagnostics()                        입력 편향·강수 적중
                           ├─ error_attribution() / bias_correction_cv() 오차 분해·편향 보정 탐색
+                          ├─ grid_comparison()  (--compare)             다른 격자와 비교
                           ▼
                     fcst_report.build_verify_workbook()  → 검증 엑셀
 ```
 
 **검증 엑셀 (fcst_report.py)** — 시트별 해석은 [RESULTS_GUIDE.md](RESULTS_GUIDE.md)에 있습니다.
-- 값으로 넣는 것: 예보 일 입력(집계값), ASOS 관측 일자료, 오차분해 시트(Python 계산)
+- 값으로 넣는 것: 예보 일 입력(집계값), ASOS 관측 일자료, 오차분해·격자비교 시트(Python 계산)
 - 수식으로 계산하는 것: Ra·Rs·PM ETo·Kc·ETc·기준선·오차·지표·판정
 - 노란 칸(설정·Rs계수·합격 기준)을 바꾸면 다시 계산됩니다.
 - LibreOffice 재계산 결과가 Python 계산과 1e-14 이내로 일치합니다(G3 점검).

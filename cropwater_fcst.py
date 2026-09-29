@@ -279,8 +279,9 @@ def load_obs(path):
     return obs, meta
 
 
-def run_verify(fcst_paths, obs_path, stn, coef_path="rs_coef.csv", analysis=True):
-    """검증 전체 계산. analysis=True면 오차분해·편향보정 탐색까지"""
+def run_verify(fcst_paths, obs_path, stn, coef_path="rs_coef.csv", analysis=True, compare_paths=None):
+    """검증 전체 계산. analysis=True면 오차분해·편향보정 탐색까지.
+       compare_paths: 비교할 다른 격자의 과거 예보(같은 관측·계수·Kc로 계산해 격자 차이를 봄)"""
     arch = load_archive(fcst_paths)
     rep = check_archive(arch)
     st = service_table(arch)
@@ -292,11 +293,35 @@ def run_verify(fcst_paths, obs_path, stn, coef_path="rs_coef.csv", analysis=True
     res = dict(stn=str(stn), stn_name=name, stn_grid=grid, arch=arch, check=rep, table=df, obs=obs, meta=meta,
                coef=coef, kp=kp,
                h1_start=pd.Timestamp(kp["bud"]) if kp.get("bud") else df.target.min(), h1_end=obs.date.max())
+    if compare_paths:
+        arch2 = load_archive(compare_paths)
+        df2 = forecast_table(service_table(arch2), obs, meta["lat"], meta["elev"], coef, kp)
+        res["compare"] = dict(check=check_archive(arch2), table=df2)
+        res["grid_cmp"] = grid_comparison(df, df2)
     if analysis:
         res["attr"], res["attr_names"] = error_attribution(df, meta["lat"], meta["elev"], coef)
         res["bc"], res["bc_bias"], res["bc_folds"] = bias_correction_cv(df, meta["lat"], meta["elev"], coef)
         res["findings"] = findings(res)
     return res
+
+
+def grid_comparison(df, df2):
+    """두 격자 예보의 비교: 선행시간별 성능·입력 편향, 같은 발표·대상일의 직접 차이(df − df2)"""
+    met = pd.concat([lead_metrics(d).assign(grid=g) for g, d in (("A", df), ("B", df2))], ignore_index=True)
+    diag = pd.concat([input_diagnostics(d).assign(grid=g) for g, d in (("A", df), ("B", df2))], ignore_index=True)
+    j = df.merge(df2, on=["run", "lead_day"], suffixes=("", "_B"))
+    rows = []
+    for c, label in (("Tmax", "최고기온 (℃)"), ("Tmin", "최저기온 (℃)"), ("ea", "ea (kPa)"), ("u10", "풍속 u10 (m/s)"),
+                     ("rain", "강수 (mm/일)"), ("Rs_S3", "추정 Rs (MJ/m²/일)"), ("ETo_S3", "예보 ETo (mm/일)")):
+        d = j[c] - j[f"{c}_B"]
+        rows.append(dict(item=label, mean=d.mean(), sd=d.std(), frac_diff=float((d.abs() > 1e-9).mean())))
+    diff = pd.DataFrame(rows)
+    j["month"] = j.target.dt.month
+    by_month = j.groupby("month").apply(lambda x: pd.Series(dict(
+        n=len(x), dTmax=(x.Tmax - x.Tmax_B).mean(), dTmin=(x.Tmin - x.Tmin_B).mean(),
+        du10=(x.u10 - x.u10_B).mean(), dETo=(x.ETo_S3 - x.ETo_S3_B).mean()))).reset_index()
+    agree = float((j.rain_flag == j.rain_flag_B).mean())
+    return dict(metrics=met, diag=diag, diff=diff, by_month=by_month, rain_agree=agree, n=len(j))
 
 
 def findings(res):
@@ -317,6 +342,14 @@ def findings(res):
     out.append(f"탐색: 월 단위 교차검증한 기온+풍속 편향 보정은 D+1 RMSE를 {raw:.2f} → {b2:.2f} mm/일"
                f"({(1 - b2 / raw):.0%} 감소), 편향을 거의 0으로 줄임 (오차분해 ②). 채택 여부는 다음 게이트에서 결정")
     loc = res["check"]["location"]
+    if res.get("grid_cmp"):
+        gc, loc2 = res["grid_cmp"], res["compare"]["check"]["location"]
+        d = gc["diff"].set_index("item")["mean"]
+        m = gc["metrics"]
+        r1 = lambda g, rn: float(m[(m.grid == g) & (m.run_name == rn) & (m.lead_day == 1)].RMSE.iloc[0])
+        out.append(f"격자 비교({', '.join(loc)} − {', '.join(loc2)}, 같은 발표·대상일): 최고기온 {d['최고기온 (℃)']:+.1f}℃, "
+                   f"최저기온 {d['최저기온 (℃)']:+.1f}℃, 예보 ETo {d['예보 ETo (mm/일)']:+.2f} mm/일. "
+                   f"D+1 RMSE 아침 {r1('B', '아침'):.2f}→{r1('A', '아침'):.2f}, 저녁 {r1('B', '저녁'):.2f}→{r1('A', '저녁'):.2f} (격자비교 시트)")
     if res.get("stn_grid") and loc != [res["stn_grid"]]:
         out.append(f"주의: 예보 격자 {', '.join(loc)}가 ASOS {res['stn']} 격자({res['stn_grid']})와 다릅니다. "
                    f"대표성 오차(특히 기온 편향)가 달라질 수 있어 {res['stn_grid']} 자료로 재확인이 필요합니다")
@@ -337,6 +370,7 @@ def main(argv=None):
     v.add_argument("--fcst", nargs="+", required=True); v.add_argument("--obs", required=True)
     v.add_argument("--stn", required=True); v.add_argument("--coef", default="rs_coef.csv")
     v.add_argument("--out", default=None)
+    v.add_argument("--compare", nargs="+", default=None, help="비교할 다른 격자의 과거 예보 CSV 폴더(또는 파일들)")
     a = ap.parse_args(argv)
 
     if a.cmd == "calib":
@@ -348,7 +382,7 @@ def main(argv=None):
         print(f"[저장] {a.coef}")
         return
 
-    res = run_verify(a.fcst, a.obs, a.stn, a.coef)
+    res = run_verify(a.fcst, a.obs, a.stn, a.coef, compare_paths=a.compare)
     df = res["table"]
     met = lead_metrics(df)
     print(f"[예보] 격자 {res['check']['location']}, 발표 {res['check'].get('issues')}회, "
@@ -361,7 +395,8 @@ def main(argv=None):
         print(f"[H1 {m}] {res['h1_start']:%Y-%m-%d}~{res['h1_end']:%Y-%m-%d} RMSE {s['RMSE']:.3f}, 합계오차 {s['SUMERR']:+.1%}")
     for rn, v in h2_verdict(met).items():
         print(f"[H2] {rn}: {'통과' if v['pass_'] else '미달'} (최소 개선율 {v['min_skill']:.0%}, D+1 RMSE {v['rmse_d1']:.2f})")
-    out = a.out or f"output/fcst_verify({a.stn})_{df.target.min():%Y%m%d}_{df.target.max():%Y%m%d}.xlsx"
+    grid = "-".join(res["check"]["location"]) or "grid"
+    out = a.out or f"output/fcst_verify({a.stn})_{grid}_{df.target.min():%Y%m%d}_{df.target.max():%Y%m%d}.xlsx"
     from fcst_report import build_verify_workbook
     saved = build_verify_workbook(res, out)
     print(f"[완료] {saved}")

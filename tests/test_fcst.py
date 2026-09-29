@@ -185,3 +185,29 @@ def test_excel_pm_formula_matches_python(tmax, tmin, ea, u2, rs, J):
     g = 0.000665 * pressure_from_elev(elev)
     f = pm(*(repr(x) for x in (tmax, tmin, ea, u2, rs, rso, t, es, d, g)))
     assert _eval_excel(f) == pytest.approx(eto_penman_monteith(tmax, tmin, rs, u2, ea, elev, lat, J), rel=1e-12)
+
+
+# ── 격자 비교 ─────────────────────────────────────────────────────────
+def test_grid_comparison_direct_difference():
+    from cropwater_fcst import grid_comparison
+    rng = np.random.default_rng(1)
+    rows = []
+    for rn, h, ks in (("아침", 2, (0, 1, 2, 3)), ("저녁", 17, (1, 2, 3, 4))):
+        for d in range(6):
+            run = TS("2026-05-01") + pd.Timedelta(days=d, hours=h)
+            for k in ks:
+                o = 4 + rng.normal()
+                rows.append(dict(run=run, run_name=rn, lead_day=k, target=run.normalize() + pd.Timedelta(days=k),
+                                 Tmax=25 + rng.normal(), Tmin=12.0, Tmax_obs=26.0, Tmin_obs=12.0, ea=1.2, ea_obs=1.2,
+                                 u10=1.5, u10_obs=1.8, Rs_S3=18.0, Rs_obs=19.0, rain=0.0, rain_flag=0, flag_obs=0,
+                                 ETo_S3=o - 0.2, ETo_obs=o, ETo_pers=o + 1.0, ETo_7d=o + 0.8))
+    a = pd.DataFrame(rows)
+    b = a.assign(Tmax=a.Tmax - 1.0, ETo_S3=a.ETo_S3 - 0.1)
+    gc = grid_comparison(a, b)
+    d = gc["diff"].set_index("item")["mean"]
+    assert d["최고기온 (℃)"] == pytest.approx(1.0) and d["예보 ETo (mm/일)"] == pytest.approx(0.1)
+    assert d["풍속 u10 (m/s)"] == pytest.approx(0.0) and gc["rain_agree"] == 1.0 and gc["n"] == len(a)
+    m = gc["metrics"]
+    ra = m[(m.grid == "A") & (m.run_name == "아침") & (m.lead_day == 1)].RMSE.iloc[0]
+    rb = m[(m.grid == "B") & (m.run_name == "아침") & (m.lead_day == 1)].RMSE.iloc[0]
+    assert ra == pytest.approx(0.2) and rb == pytest.approx(0.3)

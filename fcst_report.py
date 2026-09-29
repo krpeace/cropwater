@@ -491,6 +491,65 @@ def sheet_attr(wb, res):
     return ws
 
 
+# ── 격자비교 (Python 계산값, --compare 때만) ─────────────────────────────
+def sheet_grid_compare(wb, res):
+    gc = res["grid_cmp"]
+    A, B = ", ".join(res["check"]["location"]), ", ".join(res["compare"]["check"]["location"])
+    ws = wb.create_sheet("격자비교")
+    T(ws, 1, 1, f"격자 비교 — A {A} (이 검증) vs B {B} — Python(cropwater_fcst.py) 계산값", 12, True, GREEN)
+    T(ws, 2, 1, f"같은 관측·Rs 계수·Kc로 계산했습니다. A − B 직접 차이는 같은 발표·선행일끼리 비교합니다(n = {gc['n']}).", 9, color="555555")
+    r = 4
+    T(ws, r, 1, "① 선행시간별 예보 ETo 성능 (S3, mm/일)", 11, True, GREEN); r += 1
+    hdr = ["구분", "선행일", f"A MBE", f"A RMSE", f"A 개선율(지속성)", f"B MBE", f"B RMSE", f"B 개선율(지속성)", "RMSE 차이 A−B"]
+    for j, h in enumerate(hdr, 1):
+        H(ws, r, j, h, size=9)
+    r += 1
+    m = gc["metrics"]
+    for _, a in m[m.grid == "A"].iterrows():
+        b = m[(m.grid == "B") & (m.run_name == a.run_name) & (m.lead_day == a.lead_day)].iloc[0]
+        vals = [a.run_name, int(a.lead_day), a.MBE, a.RMSE, a.skill_pers, b.MBE, b.RMSE, b.skill_pers, a.RMSE - b.RMSE]
+        for j, v in enumerate(vals, 1):
+            C(ws, r, j, v, PCT if j in (5, 8) else (F3 if j > 2 else None))
+        r += 1
+    r += 1
+    T(ws, r, 1, "② 입력 편향 (예보 − ASOS 관측)", 11, True, GREEN); r += 1
+    hdr = ["구분", "선행일", "A 최고기온(℃)", "A 최저기온(℃)", "A 풍속(m/s)", "B 최고기온(℃)", "B 최저기온(℃)", "B 풍속(m/s)"]
+    for j, h in enumerate(hdr, 1):
+        H(ws, r, j, h, size=9)
+    r += 1
+    dg = gc["diag"]
+    for _, a in dg[dg.grid == "A"].iterrows():
+        b = dg[(dg.grid == "B") & (dg.run_name == a.run_name) & (dg.lead_day == a.lead_day)].iloc[0]
+        vals = [a.run_name, int(a.lead_day), a.Tmax_MBE, a.Tmin_MBE, a.u10_MBE, b.Tmax_MBE, b.Tmin_MBE, b.u10_MBE]
+        for j, v in enumerate(vals, 1):
+            C(ws, r, j, v, F2 if j > 2 else None)
+        r += 1
+    r += 1
+    T(ws, r, 1, "③ 같은 발표·선행일의 직접 차이 (A − B)", 11, True, GREEN); r += 1
+    for j, h in enumerate(["항목", "평균", "표준편차", "값이 다른 비율"], 1):
+        H(ws, r, j, h, size=9)
+    r += 1
+    for _, d in gc["diff"].iterrows():
+        C(ws, r, 1, d["item"], left=True); C(ws, r, 2, d["mean"], "+0.00;-0.00;0.00"); C(ws, r, 3, d["sd"], F2)
+        C(ws, r, 4, d["frac_diff"], PCT)
+        r += 1
+    C(ws, r, 1, "강수유무(≥ 1 mm) 일치율", left=True); C(ws, r, 2, gc["rain_agree"], PCT); r += 2
+    T(ws, r, 1, "④ 월별 직접 차이 (A − B, 대상일 기준)", 11, True, GREEN); r += 1
+    for j, h in enumerate(["월", "n", "최고기온(℃)", "최저기온(℃)", "풍속(m/s)", "예보 ETo(mm/일)"], 1):
+        H(ws, r, j, h, size=9)
+    r += 1
+    for _, d in gc["by_month"].iterrows():
+        vals = [int(d.month), int(d.n), d.dTmax, d.dTmin, d.du10, d.dETo]
+        for j, v in enumerate(vals, 1):
+            C(ws, r, j, v, "+0.00;-0.00;0.00" if j > 2 else "0")
+        r += 1
+    r += 1
+    T(ws, r, 1, "읽는 법: 두 격자는 입력 관측·계수가 같으므로 성능 차이는 모두 예보 격자 차이(대표성)에서 옵니다. "
+                "농장 예보는 농장 좌표의 격자로 받아야 합니다(THEORY 9장 ◇ 격자 주의점).", 9, color="555555")
+    widths(ws, {"A": 22, "B": 10, **{CL(j): 14 for j in range(3, 10)}})
+    return ws
+
+
 # ── 차트자료 ─────────────────────────────────────────────────────────────
 def sheet_chartdata(wb, df, db_rows, obs_rows):
     ws = wb.create_sheet("차트자료")
@@ -529,6 +588,8 @@ def sheet_summary(wb, res, db_rows, c3_rows, groups, chart_rows):
         ("Rs 추정", f"식(50) + 강수유무 보정(S3), 계수 {res['coef'].get('source', '')} — Rs계수 시트"),
         ("작물계수", f"{res['meta']['settings'].get('작물', '')} 시나리오 {res['kp']['scenario']}, 생육 시작 {res['kp']['bud']} — 01-Cycle 워크북과 같은 Kc"),
     ]
+    if res.get("compare"):
+        info.append(("비교 격자", f"{', '.join(res['compare']['check']['location'])} — 같은 관측·계수·Kc로 계산해 격자비교 시트에 정리"))
     r = 4
     for k, v in info:
         C(ws, r, 1, k, left=True, fill=LIGHT, bold=True); C(ws, r, 2, v, left=True)
@@ -678,6 +739,12 @@ def _metric_table(ws, r, hdr, groups, db, fcol, ocol, ecol, pcol, mcol):
 
 # ── 방법 ────────────────────────────────────────────────────────────────
 def sheet_method(wb, res):
+    df, loc, sg = res["table"], res["check"]["location"], res.get("stn_grid")
+    if sg and loc == [sg]:
+        grid_note = f"예보 격자 {sg} = ASOS {res['stn']} 관측소 격자. 5 km 격자 대표값과 지점 관측의 차이(대표성 오차)는 남음."
+    else:
+        grid_note = (f"예보 격자 {', '.join(loc)}가 ASOS {res['stn']} 관측소 격자({sg or '미등록'})와 다름 → "
+                     f"대표성 오차가 달라질 수 있음.")
     ws = wb.create_sheet("방법")
     T(ws, 1, 1, "방법과 정의 (근거: docs/THEORY.md 9장, 설계: docs/ARCHITECTURE.md 7장)", 12, True, GREEN)
     items = [
@@ -699,8 +766,10 @@ def sheet_method(wb, res):
         ("", "개선율", "1 − RMSE_예보 / RMSE_기준선. 0보다 크면 기준선보다 좋음."),
         ("", "3일 누적", "발표별 첫 3개 대상일 합계(아침 D+0~D+2, 저녁 D+1~D+3). FAO-56은 추정 Rs 기반 ETo를 여러 날 합계로 쓰도록 권고."),
         ("판정", "H2", "두 발표 각각 D+1~D+3 개선율 ≥ 기준, D+1 RMSE ≤ 상한 (요약 시트 노란 칸). 아침 D+0·저녁 D+4는 참고."),
-        ("한계", "격자", "이 자료의 격자는 73_135(신북읍)로 ASOS 101 격자(73,134, 신사우동 등)와 다름 → 대표성 오차가 다를 수 있음."),
-        ("", "기간", "2026년 4~6월 대상일(봄~초여름)만 포함. 장마·한여름 성능은 7~9월 자료로 확인."),
+        ("한계", "격자", grid_note),
+        ("", "기간", f"대상일 {df.target.min():%Y-%m-%d} ~ {df.target.max():%Y-%m-%d}. "
+                    + ("생육기(4~9월) 전체를 포함합니다." if set(range(4, 10)) <= set(df.target.dt.month)
+                       else "생육기(4~9월) 중 일부만 포함 → 나머지 달의 예보 자료로 확인.")),
         ("", "강수", "예보 강수는 강수유무(Rs 보정)에만 쓰였고, 유효강수·물수지 영향은 다음 단계(G4)에서 검증."),
     ]
     H(ws, 3, 1, "구분"); H(ws, 3, 2, "항목"); H(ws, 3, 3, "내용")
@@ -732,15 +801,19 @@ def build_verify_workbook(res, out):
     _, c3_rows = sheet_cum3(wb, df, db_rows, run_ids)
     sheet_diag(wb, db_rows, groups)
     sheet_attr(wb, res)
+    if res.get("grid_cmp"):
+        sheet_grid_compare(wb, res)
     _, chart_rows = sheet_chartdata(wb, df, db_rows, obs_rows)
     sheet_summary(wb, res, db_rows, c3_rows, groups, chart_rows)
     sheet_method(wb, res)
-    order = ["요약", "일별비교", "3일누적", "입력진단", "오차분해", "Rs계수", "관측", "설정", "방법", "차트자료"]
+    order = ["요약", "일별비교", "3일누적", "입력진단", "오차분해"] + (["격자비교"] if res.get("grid_cmp") else []) + \
+            ["Rs계수", "관측", "설정", "방법", "차트자료"]
     wb._sheets = [wb[n] for n in order]
-    for n in ("요약", "Rs계수", "설정", "방법", "오차분해", "입력진단", "3일누적"):
-        wb[n].sheet_view.showGridLines = False
+    for n in ("요약", "Rs계수", "설정", "방법", "오차분해", "입력진단", "3일누적", "격자비교"):
+        if n in wb.sheetnames:
+            wb[n].sheet_view.showGridLines = False
     wb["요약"].sheet_properties.tabColor = GREEN
-    for n in ("요약", "Rs계수", "입력진단", "오차분해", "방법", "설정"):
+    for n in [x for x in ("요약", "Rs계수", "입력진단", "오차분해", "격자비교", "방법", "설정") if x in wb.sheetnames]:
         w = wb[n]; w.page_setup.orientation = "landscape"; w.page_setup.fitToWidth = 1; w.page_setup.fitToHeight = 0
         w.sheet_properties.pageSetUpPr.fitToPage = True
     return safe_save(wb, out)

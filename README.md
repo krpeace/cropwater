@@ -134,7 +134,8 @@ python cropwater_fcst.py verify --fcst data/fcst_101 --obs output/eto101_apple_2
 | `--fcst` | 과거 단기예보 CSV 폴더 또는 파일들 (TMX·TMN·TMP·REH·WSD·PCP) |
 | `--obs` | `cropwater_station.py` 출력 워크북 (관측 기준값·Kc 설정). 첫 발표 7일 전부터 포함 |
 | `--stn` | ASOS 지점 번호 (rs_coef.csv 행 선택) |
-| `--coef` / `--out` | 계수 파일(기본 `rs_coef.csv`) / 출력 파일명 |
+| `--coef` / `--out` | 계수 파일(기본 `rs_coef.csv`) / 출력 파일명 (기본 `output/fcst_verify(지점)_격자_시작_끝.xlsx`) |
+| `--compare` | (선택) 비교할 다른 격자의 과거 예보 → '격자비교' 시트 |
 
 > 가설·합격 기준·게이트 판정은 [docs/VALIDATION.md](docs/VALIDATION.md), 이론은 [THEORY.md 9장](docs/THEORY.md)에 있습니다.
 
@@ -174,7 +175,7 @@ python cropwater_fcst.py verify --fcst data/fcst_101 --obs output/eto101_apple_2
 | **관수필요_달력** | Dr 히트맵 (흰→연녹→연노→진적) + Dr 선형 차트 |
 | **설명** | 계산 방법·파라미터 |
 
-### cropwater_fcst.py verify (10시트)
+### cropwater_fcst.py verify (10시트, --compare 시 11시트)
 
 | 시트 | 내용 |
 | :--- | :--- |
@@ -182,6 +183,7 @@ python cropwater_fcst.py verify --fcst data/fcst_101 --obs output/eto101_apple_2
 | **일별비교** | 발표 × 대상일 예보 입력·Rs·PM ETo·기준선·ETc·입력 오차 (라이브 수식) |
 | **3일누적 / 입력진단** | 발표별 3일 합 오차 / 입력 편향·강수 적중 |
 | **오차분해** | 입력 교체 오차 분해, 편향 보정 탐색 (Python 계산값) |
+| **격자비교** (선택) | 두 격자 예보의 성능·입력 편향·직접 차이 (Python 계산값) |
 | **Rs계수 / 관측 / 설정** | Rs 계수·H1 재검증 / ASOS 관측 ETo·Kc / 지점·예보·Kc 설정 |
 | **방법 / 차트자료** | 정의·규칙·한계 / 차트 원본 |
 
