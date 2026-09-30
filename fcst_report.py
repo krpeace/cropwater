@@ -9,7 +9,7 @@ fcst_report.py — 02-Cycle H2 검증 엑셀 (라이브 수식)
   - 나머지는 엑셀 수식: Ra·Rs·PM ETo·Kc·ETc·기준선·오차·지표·판정·월별 지표
   - 노란 칸(설정·Rs계수·합격 기준·월별 선행일)을 바꾸면 전체가 다시 계산된다
 """
-import datetime as dt
+import datetime as dt, os
 
 import numpy as np
 import pandas as pd
@@ -126,7 +126,7 @@ def sheet_settings(wb, res):
         ("lm", "L_mid (일)", kp["L"][2], "FAO-56 Table 11"),
         ("ll", "L_late (일)", kp["L"][3], "FAO-56 Table 11"),
         ("h", "생육중기 수고 h (m)", kp["h"], "식(62)·(65)의 (h/3)^0.3 항"),
-        ("u2m", "중기 평균 u2 (m/s)", kp["u2_mid"], "01-Cycle 자동집계값(2026 관측, 생육중기)"),
+        ("u2m", "중기 평균 u2 (m/s)", kp["u2_mid"], "01-Cycle 자동집계값(관측 워크북, 생육중기)"),
         ("rhm", "중기 평균 RHmin (%)", kp["rh_mid"], "01-Cycle 자동집계값"),
         ("u2e", "후기 평균 u2 (m/s)", kp["u2_end"], "01-Cycle 값(후기 관측 부족 시 기본값 1.5)"),
         ("rhe", "후기 평균 RHmin (%)", kp["rh_end"], "01-Cycle 값(후기 관측 부족 시 기본값 55)"),
@@ -169,7 +169,8 @@ R_ROWS = {}
 def sheet_rscoef(wb, res, obs_rows):
     ws = wb.create_sheet("Rs계수")
     cf = res["coef"]; fitinfo = cf
-    T(ws, 1, 1, "Rs 추정 계수와 H1 재검증 (G2) — 계수는 검증 연도(2026)와 겹치지 않는 해의 관측으로 정함", 12, True, GREEN)
+    yr = res["table"].target.min().year if len(res["table"]) else ""
+    T(ws, 1, 1, f"Rs 추정 계수와 H1 재검증 (G2) — 계수는 검증 연도({yr})와 겹치지 않는 해의 관측으로 정함", 12, True, GREEN)
     H(ws, 3, 1, "항목"); H(ws, 3, 2, "값"); H(ws, 3, 3, "설명")
     items = [
         ("a", "a (S3)", cf.get("a"), "Rs/Ra = a + b·√(Tmax−Tmin) + c·강수유무  [THEORY 9장]"),
@@ -190,7 +191,7 @@ def sheet_rscoef(wb, res, obs_rows):
         C(ws, r, 3, note, left=True, color="555555", size=9)
         r += 1
     r += 1
-    T(ws, r, 1, "H1 재검증 — 관측 입력(기온·습도·풍속·기압)에 Rs만 추정 → 관측 ETo와 비교", 11, True, GREEN); r += 1
+    T(ws, r, 1, "H1 재검증 — 관측 입력(기온·습도·풍속·기압)에 Rs만 추정 → 관측 ETo와 비교 (관측 결측일 제외)", 11, True, GREEN); r += 1
     C(ws, r, 1, "검증 시작일", left=True, fill=LIGHT); C(ws, r, 2, res["h1_start"].date(), DATE, fill=YEL); R_ROWS["h1s"] = f"$B${r}"; r += 1
     C(ws, r, 1, "검증 종료일", left=True, fill=LIGHT); C(ws, r, 2, res["h1_end"].date(), DATE, fill=YEL); R_ROWS["h1e"] = f"$B${r}"; r += 1
     C(ws, r, 1, "H1 기준: RMSE 상한 (mm/일)", left=True, fill=LIGHT); C(ws, r, 2, 0.6, F2, fill=YEL); R_ROWS["h1rm"] = f"$B${r}"; r += 1
@@ -202,7 +203,10 @@ def sheet_rscoef(wb, res, obs_rows):
     r += 1
     a0, a1 = obs_rows
     rng = lambda col: f"관측!${col}${a0}:${col}${a1}"
-    msk = f"(({rng('A')}>={R_ROWS['h1s']})*({rng('A')}<={R_ROWS['h1e']}))"
+    # 관측 결측일(기온·풍속·일사·습도가 하나라도 없음)은 빼고 셈 — Python obs_daily의 관측 ETo 결측 규칙과 같음
+    ok = (f"(ISNUMBER({rng('B')})*ISNUMBER({rng('C')})*ISNUMBER({rng('E')})*ISNUMBER({rng('I')})"
+          f"*((ISNUMBER({rng('D')})+ISNUMBER({rng('F')})+ISNUMBER({rng('G')}))>0))")
+    msk = f"(({rng('A')}>={R_ROWS['h1s']})*({rng('A')}<={R_ROWS['h1e']})*{ok})"
     R_ROWS["h1_first"] = r
     for name, eto, rs in (("S1 식(50) kRs 0.16", "AC", "Z"), ("S2 식(50) 지점 kRs", "AD", "AA"),
                           ("S3 식(50)+강수유무 보정 ★", "AE", "AB")):
@@ -226,7 +230,7 @@ def sheet_rscoef(wb, res, obs_rows):
         H(ws, r, j, h)
     r += 1
     for m in range(res["h1_start"].month, res["h1_end"].month + 1):
-        mm = f"(({rng('K')}={m})*({rng('A')}>={R_ROWS['h1s']})*({rng('A')}<={R_ROWS['h1e']}))"
+        mm = f"(({rng('K')}={m})*({rng('A')}>={R_ROWS['h1s']})*({rng('A')}<={R_ROWS['h1e']})*{ok})"
         C(ws, r, 1, m)
         ws.cell(r, 2, f"=SUMPRODUCT({mm}*1)")
         ws.cell(r, 3, f"=IF(B{r}>0,SUMPRODUCT({mm}*{rng('X')})/B{r},0)")
@@ -380,7 +384,7 @@ def sheet_daily(wb, df, obs_rows, sky=False):
     folds = None
     if sky:
         from cropwater_fcst import month_folds
-        folds = month_folds(df.target).values
+        folds = df["s4_fold"].astype(str).values if "s4_fold" in df else month_folds(df.target).values
     fmt_val = {"run": DTM, "rdate": DATE, "tgt": DATE, "ea": F3, "u10": F3, "cld": F2, "ovc": F2, "pop": F2}
     fmt_f = {"flag": "0", "oflag": "0", "krow": "0", "es": F3, "dl": F3, "kc": F3, "oea": F3, "dea": F3,
              "gm": "0.00000", "judge": "General"}
@@ -458,9 +462,17 @@ def sheet_skycoef(wb, res):
       12, True, GREEN)
     T(ws, 2, 1, "Rs/Ra = a + b·√(Tmax−Tmin) + c·강수유무 + d·구름많음 비율 + e·흐림 비율, [0.05Ra, Rso]로 제한. "
                 "구름 비율 = 낮 시간 일사 비중(태양고도 사인)으로 가중한 하늘상태(SKY) 비율 (THEORY 9장)", 9, color="555555")
-    T(ws, 3, 1, "① 검증용 계수 — 월 단위 교차검증: 대상월의 행에는 그 달을 뺀 나머지 달로 맞춘 계수를 씁니다. "
-                "일별비교 시트가 '묶음|선행일' 키로 이 표를 찾습니다. 노란 칸을 바꾸면 S4 예보가 다시 계산됩니다.", 9, color=BROWN)
-    hdr = ["키", "검증 달(묶음)", "선행일 k", "학습 행 수", "a", "b", "c (강수유무)", "d (구름많음)", "e (흐림)"]
+    fixed = res.get("s4_fixed") is not None
+    if fixed:
+        f = res["s4_fixed"]
+        T(ws, 3, 1, f"① 검증용 계수 — 다른 해 운영 계수를 그대로 적용(계수 고정): {s4_source(res)}. 검증 연도 자료는 계수에 쓰지 않았습니다"
+                    "(독립 연도 검증). 일별비교 시트가 '고정|선행일' 키로 이 표를 찾습니다. 노란 칸을 바꾸면 S4 예보가 다시 계산됩니다.",
+          9, color=BROWN)
+    else:
+        T(ws, 3, 1, "① 검증용 계수 — 월 단위 교차검증: 대상월의 행에는 그 달을 뺀 나머지 달로 맞춘 계수를 씁니다. "
+                    "일별비교 시트가 '묶음|선행일' 키로 이 표를 찾습니다. 노란 칸을 바꾸면 S4 예보가 다시 계산됩니다.", 9, color=BROWN)
+    hdr = ["키", "계수 묶음" if fixed else "검증 달(묶음)", "선행일 k", "적합 행 수(원래 해)" if fixed else "학습 행 수",
+           "a", "b", "c (강수유무)", "d (구름많음)", "e (흐림)"]
     for j, h in enumerate(hdr, 1):
         H(ws, 5, j, h, size=9)
     tab = res["s4_table"].sort_values(["fold", "lead_day"]).reset_index(drop=True)
@@ -468,15 +480,17 @@ def sheet_skycoef(wb, res):
     for i, row in tab.iterrows():
         r = r0 + i
         C(ws, r, 1, f"{row.fold}|{int(row.lead_day)}"); C(ws, r, 2, row.fold); C(ws, r, 3, int(row.lead_day))
-        C(ws, r, 4, int(row.n), "0")
+        C(ws, r, 4, None if _num(pd.to_numeric(row.n, errors="coerce")) is None else int(float(row.n)), "0")
         for j, n in enumerate(("a", "b", "c", "d", "e"), 5):
             C(ws, r, j, float(row[n]), "0.0000", fill=YEL)
     r1 = r0 + len(tab) - 1
     rng = lambda col: f"SKY계수!${col}${r0}:${col}${r1}"
     K_ROWS.update(key=rng("A"), a=rng("E"), b=rng("F"), c=rng("G"), d=rng("H"), e=rng("I"))
     r = r1 + 2
-    T(ws, r, 1, "② 운영 계수 — 자료 전체로 선행일별 적합(rs_sky_coef.csv, calib-sky). 같은 자료로 맞춘 값이라 검증에는 쓰지 않습니다. "
-                "다른 해 자료로 독립 검증할 때와 운영(G5)에 씁니다.", 9, color=BROWN); r += 1
+    T(ws, r, 1, ("② 비교 — 이 자료(검증 연도)로 맞춘 계수(참고). ①의 다른 해 계수와 비교해 계수가 해마다 얼마나 달라지는지 봅니다. "
+                 "같은 자료로 맞춘 값이라 검증에는 쓰지 않습니다.") if fixed else
+                ("② 운영 계수 — 자료 전체로 선행일별 적합(rs_sky_coef.csv, calib-sky). 같은 자료로 맞춘 값이라 검증에는 쓰지 않습니다. "
+                 "다른 해 자료로 독립 검증할 때와 운영(G5)에 씁니다."), 9, color=BROWN); r += 1
     hdr = ["선행일 k", "a", "b", "c (강수유무)", "d (구름많음)", "e (흐림)", "적합 행 수", "적합 기간", "Rs RMSE (적합 자료)"]
     for j, h in enumerate(hdr, 1):
         H(ws, r, j, h, size=9)
@@ -491,7 +505,9 @@ def sheet_skycoef(wb, res):
     for n in ["읽는 법: d·e가 음수 = 구름이 많을수록 Rs가 줄어듦. 가까운 날(D+0)에서 먼 날(D+3)로 갈수록 흐림 계수(e)의 크기가 줄고 "
               "강수유무 계수(c)의 크기가 커지는 경향 → 먼 날의 하늘상태 예보는 덜 믿을 만하다는 뜻입니다.",
               "관측 운량이 없어 계수는 '예보 입력 → 관측 Rs'로 맞췄습니다. 그래서 예보 입력의 계통오차(좁은 일교차, 잦은 비 예보)까지 계수가 흡수합니다.",
-              "S3(Rs계수 시트)는 다른 해(2025) 관측으로 정한 계수라 이 표와 성격이 다릅니다. S4 계수의 다른 해 검증은 2025년 하늘상태 예보를 받은 뒤 합니다."]:
+              (f"S3(Rs계수 시트)도 검증 연도와 다른 해의 관측으로 정한 계수입니다({res['coef'].get('source', '')})." if fixed else
+               f"S3(Rs계수 시트)는 관측 입력으로 정한 계수({res['coef'].get('source', '')})라 이 표와 성격이 다릅니다. "
+               "S4 계수의 다른 해 검증은 verify --s4-coef로 합니다(VALIDATION #13).")]:
         T(ws, r, 1, n, 9, color="555555"); r += 1
     widths(ws, {"A": 14, "B": 13, "C": 9, "D": 11, **{CL(j): 12 for j in range(5, 10)}})
     ws.column_dimensions["H"].width = 24
@@ -607,8 +623,10 @@ def sheet_attr(wb, res):
     T(ws, r, 1, f"교차검증 묶음: {', '.join(res['bc_folds'])} (마지막 달 대상일이 10일 미만이면 앞 달에 포함). H2 판정에는 쓰지 않는 탐색 결과입니다.", 9, color="555555"); r += 1
     T(ws, r, 1, "방법: 기온 보정 = Tmax·Tmin에서 평균 편향을 뺌 / 기온+풍속 = 풍속 편향도 뺌 / ETo 비율 = 예보 ETo × (관측 합 ÷ 예보 합)"
                 + (" / Rs 계수 재보정 = Rs 식의 a·b·c를 예보 일교차·예보 강수유무와 관측 Rs로 다시 맞춤" if res.get("main", "S3") == "S3" else
-                   ". 주 방법 S4는 계수가 이미 예보 입력으로 맞춘 교차검증 값이라 'Rs 계수 재보정'은 생략하고, ETo 비율은 검증 달까지 뺀 계수로 "
-                   "다시 계산한 학습 행에서 구함(중첩 교차검증)"), 9, color="555555"); r += 1
+                   (". 주 방법 S4는 다른 해 계수를 고정 적용했으므로 'Rs 계수 재보정'은 생략하고(이 해 자료로 다시 맞추면 독립 검증이 아님), "
+                    "ETo 비율은 학습 행의 예보로 그대로 구함" if res.get("s4_fixed") is not None else
+                    ". 주 방법 S4는 계수가 이미 예보 입력으로 맞춘 교차검증 값이라 'Rs 계수 재보정'은 생략하고, ETo 비율은 검증 달까지 뺀 계수로 "
+                    "다시 계산한 학습 행에서 구함(중첩 교차검증)")), 9, color="555555"); r += 1
     bc = res["bc"]
     methods = list(dict.fromkeys(bc.method))
     for metric, label, fmt in (("RMSE", "RMSE (mm/일)", F3), ("MBE", "MBE (mm/일)", F3), ("skill_pers", "지속성 대비 개선율", PCT),
@@ -884,7 +902,15 @@ def _num(v):
     return None if v is None or pd.isna(v) else float(v)
 
 
-SOURCE_NAMES = {"portal": "기상자료개방포털 과거 단기예보", "openapi": "기상청 단기예보 조회서비스(OpenAPI) 응답"}
+SOURCE_NAMES = {"portal": "기상자료개방포털 과거 단기예보", "openapi": "기상청 단기예보 조회서비스(OpenAPI) 응답",
+                "element": "단기예보 요소별 CSV(발표·예보 일시 KST, OpenAPI 값 표기)"}
+
+
+def s4_source(res):
+    """고정 S4 계수의 출처 설명: 파일 이름·적합 기간"""
+    f = res["s4_fixed"]
+    per = f"{f.fit_start.min()} ~ {f.fit_end.max()}" if str(f.fit_start.min()) not in ("", "nan") else "기간 미기재"
+    return f"{os.path.basename(str(res.get('s4_coef_path') or 'rs_sky_coef.csv'))}, 적합 {per}"
 
 
 def source_text(chk):
@@ -897,8 +923,11 @@ def sheet_summary(wb, res, db_rows, c3_rows, groups, chart_rows):
     chk, df = res["check"], res["table"]
     d0, d1 = db_rows
     db = lambda col: f"일별비교!${col}${d0}:${col}${d1}"
-    T(ws, 1, 1, f"단기예보 기반 ETo·ETc 예측 검증 (H2) — ASOS {res['stn']} · {res['meta']['settings'].get('작물', '사과')}", 14, True, GREEN)
-    T(ws, 2, 1, f"02-Cycle 3단계 · 작성 {dt.date.today():%Y-%m-%d} · cropwater_fcst.py verify · 근거 docs/THEORY.md 9장, 판정 기록 docs/VALIDATION.md", 9, color="555555")
+    fixed = res.get("s4_fixed") is not None
+    T(ws, 1, 1, f"단기예보 기반 ETo·ETc 예측 검증 (H2{', 다른 해 독립 검증' if fixed else ''}) — ASOS {res['stn']} · "
+                f"{res['meta']['settings'].get('작물', '사과')}", 14, True, GREEN)
+    T(ws, 2, 1, f"02-Cycle 3단계{' · S4 계수 고정(VALIDATION #13)' if fixed else ''} · 작성 {dt.date.today():%Y-%m-%d} · "
+                f"cropwater_fcst.py verify · 근거 docs/THEORY.md 9장, 판정 기록 docs/VALIDATION.md", 9, color="555555")
     iss = res["arch"].issues
     n_m, n_e = (int(df[df.run_name == n].run.nunique()) for n in ("아침", "저녁"))
     gaps = run_gaps(res.get("skipped_runs", []))
@@ -909,11 +938,13 @@ def sheet_summary(wb, res, db_rows, c3_rows, groups, chart_rows):
     if opt:
         cv = chk["coverage"]
         opt_txt = " · 선택 요소 " + ", ".join(f"{e} {cv[e]['first'][5:13]}시~{cv[e]['last'][5:13]}시" for e in opt)
-    rs_txt = (f"S4 = 식(50)형 + 강수유무 + 낮 시간 구름많음·흐림 비율(하늘상태 예보), 선행일별 계수를 월 단위 교차검증으로 정함"
-              f" — SKY계수 시트. 비교: S3(계수 {res['coef'].get('source', '')}, Rs계수 시트)" if main == "S4" else
+    rs_txt = (f"S4 = 식(50)형 + 강수유무 + 낮 시간 구름많음·흐림 비율(하늘상태 예보), "
+              + (f"다른 해 운영 계수를 선행일별로 그대로 적용({s4_source(res)})" if fixed else "선행일별 계수를 월 단위 교차검증으로 정함")
+              + f" — SKY계수 시트. 비교: S3(계수 {res['coef'].get('source', '')}, Rs계수 시트)" if main == "S4" else
               f"식(50) + 강수유무 보정(S3), 계수 {res['coef'].get('source', '')} — Rs계수 시트")
     info = [
-        ("예보 자료", f"{source_text(chk)}(격자 {', '.join(chk['location'])}) · TMX·TMN·TMP·REH·WSD·PCP · "
+        ("예보 자료", f"{source_text(chk)} · 격자 {', '.join(chk['location'])}"
+                    f"{'(파일에 격자 정보가 없어 실행 시 지정)' if res.get('grid_given') else ''} · TMX·TMN·TMP·REH·WSD·PCP · "
                     f"{iss[0]:%Y-%m-%d %H}시 ~ {iss[-1]:%Y-%m-%d %H}시 발표 중 6요소가 모두 있는 발표 {chk['issues']}회"
                     f" (한 요소라도 빠진 발표 {len(chk['missing_issues'])}회){opt_txt}"),
         ("서비스 발표", f"아침 02시 {n_m}회 → 오늘~D+3 · 저녁 17시 {n_e}회 → 내일~D+4 (다른 발표는 이전 시각 채움에만 사용)"),
@@ -964,7 +995,8 @@ def sheet_summary(wb, res, db_rows, c3_rows, groups, chart_rows):
     r = rows_eto[-1] + 2
     if main == "S4":
         T(ws, r, 1, "Rs 추정 방법 비교 — 같은 대상일, 예보 ETo RMSE (mm/일)와 지속성 대비 개선율. "
-                    "S4 = 하늘상태 반영(★), S3 = 식(50)+강수유무(2025 계수), S1 = 식(50) kRs 0.16", 11, True, GREEN); r += 1
+                    f"S4 = 하늘상태 반영(★), S3 = 식(50)+강수유무({res['coef'].get('fit_start', '')[:4]} 계수), S1 = 식(50) kRs 0.16",
+          11, True, GREEN); r += 1
         r = _method_table(ws, r, groups, db) + 1
     T(ws, r, 1, "선행시간별 예보 ETc (Kc × ETo, mm/일)", 11, True, GREEN); r += 1
     rows_etc = _metric_table(ws, r, met_hdr, groups, db, DB["etc"], DB["etco"], DB["xetc"], DB["xetcp"], DB["xetc7"])
@@ -1117,21 +1149,26 @@ def _metric_table(ws, r, hdr, groups, db, fcol, ocol, ecol, pcol, mcol):
 def sheet_method(wb, res):
     df, loc, sg = res["table"], res["check"]["location"], res.get("stn_grid")
     fmts = res["check"].get("formats") or ["portal"]
+    api_like = any(f in fmts for f in ("openapi", "element"))
     bt = res.get("boot")
     if sg and loc == [sg]:
         grid_note = f"예보 격자 {sg} = ASOS {res['stn']} 관측소 격자. 5 km 격자 대표값과 지점 관측의 차이(대표성 오차)는 남음."
     else:
         grid_note = (f"예보 격자 {', '.join(loc)}가 ASOS {res['stn']} 관측소 격자({sg or '미등록'})와 다름 → "
                      f"대표성 오차가 달라질 수 있음.")
+    if res.get("grid_given"):
+        grid_note += " (파일에 격자 정보가 없어 실행 시 지정한 격자)"
     ws = wb.create_sheet("방법")
     T(ws, 1, 1, "방법과 정의 (근거: docs/THEORY.md 9장, 설계: docs/ARCHITECTURE.md 7장)", 12, True, GREEN)
     items = [
         ("자료", "예보", " ".join(t for f, t in (
             ("portal", "기상자료개방포털 '단기예보(격자)' 과거자료 CSV(요소별 파일): 발표일시 = CSV의 UTC 일·시 + 9시간, "
                        "여러 달을 한 파일로 받으면 'Start : YYYYMMDD' 행마다 연월을 바꿔 읽음."),
-            ("openapi", "단기예보 조회서비스(OpenAPI) 응답 CSV(한 파일에 모든 요소): 발표·예보 일시는 KST 그대로, "
-                        f"강수 문자열 '강수없음' 0 · '1mm 미만' {PCP_LT1_MM:g} · '30.0~50.0mm' {PCP_30_50_MM:g} · "
-                        f"'50.0mm 이상' {PCP_GE50_MM:g} mm/h.")) if f in fmts)
+            ("openapi", "단기예보 조회서비스(OpenAPI) 응답 CSV(한 파일에 모든 요소): 발표·예보 일시는 KST 그대로."),
+            ("element", "요소별 KST CSV(발표일·발표시각·예보일·예보시각·값, 요소마다 1파일): 일시는 KST 그대로, 값 표기는 OpenAPI와 같음. "
+                        "요소는 값으로 판별, 격자 정보는 파일에 없어 실행 시 지정."),
+            ("api", f"강수 문자열 '강수없음' 0 · '1mm 미만' {PCP_LT1_MM:g} · '30.0~50.0mm' {PCP_30_50_MM:g} · "
+                    f"'50.0mm 이상' {PCP_GE50_MM:g} mm/h.")) if f in fmts or (f == "api" and api_like))
                         + " 필수 요소 TMX·TMN·TMP·REH·WSD·PCP, 선택 요소 SKY(하늘상태)·POP(강수확률)."),
         ("", "관측", "ASOS 일자료(01-Cycle cropwater_station.py 출력 워크북 원데이터 시트). 관측 ETo는 01-Cycle 계산과정 시트와 같은 식."),
         ("서비스", "발표", "아침 02시 발표 → 오늘(D+0)~D+3, 저녁 17시 발표 → 내일(D+1)~D+4. 검증에는 이 두 발표만 사용(다른 발표를 섞으면 성능이 부풀려짐)."),
@@ -1146,17 +1183,21 @@ def sheet_method(wb, res):
                                  + ("포털 과거자료는 발표 6시간 뒤부터 들어 있음(02시 발표 → 08시부터) → 아침 D+0의 00~07시 = 전날 17·20·23시 발표. "
                                     if "portal" in fmts else "")
                                  + ("OpenAPI 자료는 발표 1시간 뒤부터 들어 있음(02시 발표 → 03시부터) → 아침 D+0의 00~02시 = 전날 23시 발표"
-                                    + (" (운영과 같음)." if fmts == ["openapi"] else ".") if "openapi" in fmts else
+                                    + (" (운영과 같음)." if "portal" not in fmts else ".") if api_like else
                                     "(API는 발표 1시간 뒤부터 제공되므로 운영에서는 00~02시만 채움)")),
         ("", "결측", "값이 ±900 이상(예: −999.9)이면 결측. 필수 6요소 중 하나라도 없는 서비스 발표는 통째로 제외(다른 발표로 대신하지 않음). "
                     "주 방법이 S4면 하늘상태가 없는 행, 그리고 대상일 관측이 없는 행도 제외. 3일 누적은 첫 3개 대상일이 모두 있을 때만."),
         ("", "마지막 날", "아침 D+3·저녁 D+4는 00시(1시간) + 03~21시(3시간 간격) 8개 시각. 풍속·강수는 코드값 → WSD 1: 같은 발표 직전 정량일 평균(최대 3.9), 2: 6.5, 3: 11 m/s / PCP 1: 1.5, 2: 9, 3: 20 mm/h × 3시간."),
         ("예보 ETo", "PM", "FAO-56 식(6), G = 0. 기압은 식(7) 고도 추정. Ra·Rso는 지점 위도·고도로 계산."),
         ("", "Rs", ("S4(★): Rs/Ra = a + b√(Tmax−Tmin) + c·강수유무 + d·구름많음 비율 + e·흐림 비율, [0.05Ra, Rso]로 제한. "
-                    "계수는 선행일별로 '예보 입력 → 관측 Rs' 최소제곱. 검증은 월 단위 교차검증(대상월을 뺀 나머지 달로 맞춘 계수, SKY계수 시트). "
-                    "비교용 S3: Rs/Ra = a + b√(Tmax−Tmin) + c·강수유무, 2025년 관측으로 정한 계수. S1: kRs 0.16.")
+                    "계수는 선행일별로 '예보 입력 → 관측 Rs' 최소제곱. "
+                    + (f"이 검증은 다른 해 운영 계수를 그대로 적용(계수 고정, {s4_source(res)}) — 독립 연도 검증. "
+                       if res.get("s4_fixed") is not None else
+                       "검증은 월 단위 교차검증(대상월을 뺀 나머지 달로 맞춘 계수, SKY계수 시트). ")
+                    + f"비교용 S3: Rs/Ra = a + b√(Tmax−Tmin) + c·강수유무, 계수 {res['coef'].get('source', '')}. S1: kRs 0.16.")
                    if res.get("main") == "S4" else
-                   "S3: Rs/Ra = a + b√(Tmax−Tmin) + c·강수유무, [0.05Ra, Rso]로 제한. 계수는 검증 연도와 겹치지 않는 해(2025)의 관측으로 결정. 비교용 S1: kRs 0.16."),
+                   f"S3: Rs/Ra = a + b√(Tmax−Tmin) + c·강수유무, [0.05Ra, Rso]로 제한. 계수는 검증 연도와 겹치지 않는 해의 관측으로 결정"
+                   f"({res['coef'].get('source', '')}). 비교용 S1: kRs 0.16."),
         ("ETc", "Kc", "01-Cycle 워크북과 같은 Kc(시나리오 표값 + 식62·65 현지기상 보정, 식66 선형 보간). 예보·관측·기준선 모두 대상일 Kc를 곱함."),
         ("기준선", "지속성", "발표일 전날(가장 최근의 완결된 관측일) 관측 ETo를 모든 선행일에 사용. 02시에는 전날 자료가 아직 공개 전일 수 있어 실제 운영보다 기준선에 유리한 가정(판정에 보수적)."),
         ("", "7일평균", "발표일 전 7일(D−7~D−1) 관측 ETo 평균."),

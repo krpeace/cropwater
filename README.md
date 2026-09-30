@@ -131,15 +131,22 @@ python cropwater_fcst.py verify --fcst data/fcst_101 --obs output/eto101_apple_2
 
 # 운영용 S4 계수: 하늘상태 포함 과거 예보 + 관측 → rs_sky_coef.csv (선행일별)
 python cropwater_fcst.py calib-sky --fcst data/fcst_101 --obs output/eto101_apple_20260101_20260928.xlsx --stn 101
+
+# 다른 해 독립 검증: S4는 다른 해 운영 계수 고정, S3 비교 계수도 다른 해 관측으로 (VALIDATION #13)
+python cropwater_fcst.py calib --obs output/eto101_apple_20260101_20260928.xlsx --stn 101 --coef rs_coef_2026.csv
+python cropwater_fcst.py verify --fcst data/fcst_101_2025 --obs output/eto101_apple_20250101_20251231.xlsx --stn 101 \
+       --grid 73_134 --coef rs_coef_2026.csv --s4-coef rs_sky_coef.csv
 ```
 
 | 파라미터 | 설명 |
 | :--- | :--- |
-| `--fcst` | 과거 단기예보 CSV 폴더 또는 파일들 (필수 TMX·TMN·TMP·REH·WSD·PCP, 선택 SKY·POP. 여러 달을 한 파일로 받아도 됨). 형식은 첫 줄로 자동 판별: 기상자료개방포털 요소별 CSV, 또는 OpenAPI(단기예보 조회서비스) 응답을 모은 CSV(`baseDate,baseTime,category,fcstDate,fcstTime,fcstValue,nx,ny`, 한 파일에 모든 요소, 하루 8회 발표를 모두 받음) |
+| `--fcst` | 과거 단기예보 CSV 폴더 또는 파일들 (필수 TMX·TMN·TMP·REH·WSD·PCP, 선택 SKY·POP. 여러 달을 한 파일로 받아도 됨). 형식은 첫 줄로 자동 판별: 기상자료개방포털 요소별 CSV, OpenAPI(단기예보 조회서비스) 응답을 모은 CSV(`baseDate,baseTime,category,fcstDate,fcstTime,fcstValue,nx,ny`, 한 파일에 모든 요소), 요소별 KST CSV(`발표일,발표시각,예보일,예보시각,값`). 하루 8회 발표를 모두 받음. 필수 요소가 빠지면 경고, 쓰지 않는 요소(바람성분 등) 파일은 건너뜀 |
 | `--obs` | `cropwater_station.py` 출력 워크북 (관측 기준값·Kc 설정). 첫 발표 7일 전부터 포함 |
 | `--stn` | ASOS 지점 번호 (rs_coef.csv 행 선택) |
 | `--coef` / `--out` | 계수 파일(기본 `rs_coef.csv`, 현재 폴더에 없으면 스크립트 폴더) / 출력 파일명 (기본 `output/fcst_verify(지점)_격자_시작_끝.xlsx`) |
 | `--compare` | (선택) 비교할 다른 격자의 과거 예보 → '격자비교' 시트 |
+| `--s4-coef` | (선택) 다른 해의 운영 S4 계수 파일(`rs_sky_coef.csv`). 주면 교차검증 대신 그대로 적용 — 독립 연도 검증 |
+| `--grid` | (선택) 파일에 격자 정보가 없을 때(요소별 KST CSV) 격자 `nx_ny`, 예: `73_134` |
 
 > 가설·합격 기준·게이트 판정은 [docs/VALIDATION.md](docs/VALIDATION.md), 이론은 [THEORY.md 9장](docs/THEORY.md)에 있습니다.
 >

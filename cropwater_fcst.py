@@ -9,6 +9,7 @@ cropwater_fcst.py — 기상청 단기예보 기반 ETo·ETc 예측과 검증 (0
   2) 예보 ETo = FAO-56 PM [식6]. 예보에 없는 Rs는 추정한다(rs_model.py)
      - S4(주 방법, 하늘상태 예보가 있을 때): 식(50)형 + 강수유무 + 낮 시간 구름많음·흐림 비율, 선행일별 계수
        검증에서는 월 단위 교차검증 계수(대상월을 뺀 나머지 달로 맞춤), 운영 계수는 rs_sky_coef.csv
+       다른 해 독립 검증(--s4-coef)에서는 다른 해의 운영 계수를 그대로 적용(계수 고정)
      - S3(비교, 하늘상태가 없을 때 주 방법): 식(50)+강수유무 보정, 다른 해 관측으로 정한 계수(rs_coef.csv)
   3) 예보 ETc = Kc × 예보 ETo  (Kc는 01-Cycle 워크북 설정 시트와 같은 값)
   4) ASOS 관측 ETo(01-Cycle 규칙)와 비교: 선행시간별 RMSE·MBE·R², 지속성·7일평균 기준선, 3일 누적
@@ -19,6 +20,10 @@ cropwater_fcst.py — 기상청 단기예보 기반 ETo·ETc 예측과 검증 (0
   python cropwater_fcst.py calib --obs output/eto101_apple_20250101_20251231.xlsx --stn 101
   # H2 검증 엑셀 (하늘상태·강수확률 CSV를 같은 폴더에 넣으면 S4로 검증)
   python cropwater_fcst.py verify --fcst data/fcst_101 --obs output/eto101_apple_20260101_20260928.xlsx --stn 101
+  # 다른 해 독립 검증 — S4는 다른 해 운영 계수 고정, S3 비교 계수도 다른 해 관측으로 (VALIDATION #13)
+  python cropwater_fcst.py calib --obs output/eto101_apple_20260101_20260928.xlsx --stn 101 --coef rs_coef_2026.csv
+  python cropwater_fcst.py verify --fcst data/fcst_101_2025 --obs output/eto101_apple_20250101_20251231.xlsx --stn 101 \
+         --grid 73_134 --coef rs_coef_2026.csv --s4-coef rs_sky_coef.csv
   # 운영용 S4 계수(선행일별) — 한 생육기 전체의 예보·관측으로 맞춰 rs_sky_coef.csv에 기록
   python cropwater_fcst.py calib-sky --fcst data/fcst_101 --obs output/eto101_apple_20260101_20260928.xlsx --stn 101
 
@@ -59,6 +64,7 @@ STATIONS = {"101": ("춘천", "73_134"), "216": ("태백", "95_119"), "119": ("�
 STATION_LON = {"101": 127.7357, "216": 128.9893, "119": 126.9830, "131": 127.4407, "129": 126.4939,
                "146": 127.1172, "156": 126.8916, "136": 128.7073, "192": 128.0400, "189": 126.5653}
 S4_FEATS = ("Tmax", "Tmin", "rain_flag", "sky_cloudy", "sky_overcast", "Ra", "Rso")
+S4_FIXED = "고정"      # 다른 해 운영 계수를 그대로 쓸 때의 계수 묶음 이름(SKY계수 시트 키 '고정|k')
 
 
 def pressure_from_elev(elev):
@@ -132,10 +138,29 @@ def s4_fit_all(df):
     return pd.DataFrame(rows)
 
 
-def forecast_table(st, obs, lat, elev, coef, kp):
+def load_s4_fixed(stn, path):
+    """다른 해 운영 S4 계수(rs_sky_coef.csv) → DataFrame[lead_day, a~e, n, fit_start, fit_end, note] (지점 행)"""
+    t = pd.read_csv(coef_file(path), encoding="utf-8-sig", dtype={"stn": str})
+    t = t[t["stn"].str.strip() == str(stn)]
+    if t.empty:
+        raise ValueError(f"{path}에 지점 {stn}의 S4 계수가 없습니다(calib-sky로 먼저 만드세요)")
+    for c in ("n", "fit_start", "fit_end", "note"):
+        if c not in t:
+            t[c] = ""
+    t = t.assign(lead_day=t.lead_day.astype(int))
+    return t[["lead_day", *S4_NAMES, "n", "fit_start", "fit_end", "note"]].sort_values("lead_day").reset_index(drop=True)
+
+
+def s4_is_fixed(df):
+    """S4 계수가 고정(다른 해 운영 계수)인지 — 행별 계수 묶음 열로 판단"""
+    return "s4_fold" in df and len(df) > 0 and bool((df["s4_fold"] == S4_FIXED).all())
+
+
+def forecast_table(st, obs, lat, elev, coef, kp, s4_fixed=None):
     """서비스 표(fcst_archive.service_table) + 관측 → 예보 ETo(S4·S3·S1), 관측·기준선, Kc·ETc.
        주 방법(★): 하늘상태가 있으면 S4, 없으면 S3 → 열 Rs_main·ETo_main·ETc_main.
-       S4 교차검증 계수표는 df.attrs["s4_table"]에 남긴다."""
+       S4 계수: s4_fixed(load_s4_fixed 결과)가 있으면 그 계수를 선행일별로 고정 적용(다른 해 독립 검증),
+       없으면 월 단위 교차검증. 계수표는 df.attrs["s4_table"], 행별 묶음은 s4_fold 열(대상월 또는 '고정')."""
     df = st.copy()
     df["target"] = pd.to_datetime(df["target"])
     df["run_date"] = df["run"].dt.normalize()
@@ -145,7 +170,7 @@ def forecast_table(st, obs, lat, elev, coef, kp):
     rs3, ra, rso = rs_estimate(df.Tmax, df.Tmin, df.rain_flag, df.target, lat, elev, coef, "S3")
     rs1, _, _ = rs_estimate(df.Tmax, df.Tmin, df.rain_flag, df.target, lat, elev, coef, "S1")
     df["Ra"], df["Rso"], df["Rs_S3"], df["Rs_S1"] = ra, rso, rs3, rs1
-    df["u2"] = df["u10"].map(lambda u: wind_2m(u, FCST_ANEM))
+    df["u2"] = df["u10"].map(lambda u: np.nan if pd.isna(u) else wind_2m(u, FCST_ANEM))   # 풍속 없음 → 결측(채점에서 빠짐)
     df["ETo_S3"] = eto_series(df.Tmax, df.Tmin, df.ea, df.u10, df.Rs_S3, df.target, lat, elev)
     df["ETo_S1"] = eto_series(df.Tmax, df.Tmin, df.ea, df.u10, df.Rs_S1, df.target, lat, elev)
     o = obs.set_index("date")
@@ -156,7 +181,15 @@ def forecast_table(st, obs, lat, elev, coef, kp):
     df["flag_obs"] = (df["rain_obs"] >= RAIN_FLAG_MM).astype(int)
     methods = ["S3", "S1"]
     if "sky_cloudy" in df and df["sky_cloudy"].notna().any():
-        co, tab = s4_cv(df)
+        if s4_fixed is None:
+            co, tab = s4_cv(df)
+            df["s4_fold"] = month_folds(df.target).values
+        else:
+            m = s4_fixed.set_index("lead_day")
+            co = np.array([m.loc[k, list(S4_NAMES)].to_numpy(float) if k in m.index else np.full(len(S4_NAMES), np.nan)
+                           for k in df.lead_day]).reshape(len(df), len(S4_NAMES))
+            tab = s4_fixed.assign(fold=S4_FIXED)[["fold", "lead_day", "n", *S4_NAMES]]
+            df["s4_fold"] = S4_FIXED
         for j, n in enumerate(S4_NAMES):
             df[f"s4_{n}"] = co[:, j]
         df["Rs_S4"] = rs_s4(df.Tmax, df.Tmin, df.rain_flag, df.sky_cloudy, df.sky_overcast, df.Ra, df.Rso, co)
@@ -429,7 +462,7 @@ def bias_correction_cv(df, lat, elev, coef):
     for f in sorted(d.fold.unique()):
         tr, te = d[d.fold != f], d[d.fold == f]
         base_tr = tr.ETo_main
-        if main == "S4":           # 학습 행의 S4 예보를 검증 달 f까지 뺀 계수로 다시 계산
+        if main == "S4" and not s4_is_fixed(d):   # 학습 행의 S4 예보를 검증 달 f까지 뺀 계수로 다시 계산(고정 계수면 그대로)
             co_f, _ = s4_cv(d, exclude=(f,))
             rs_f = rs_s4(tr.Tmax, tr.Tmin, tr.rain_flag, tr.sky_cloudy, tr.sky_overcast, tr.Ra, tr.Rso,
                          co_f[[pos[i] for i in tr.index]])
@@ -509,25 +542,35 @@ def load_obs(path):
     return obs, meta
 
 
-def run_verify(fcst_paths, obs_path, stn, coef_path="rs_coef.csv", analysis=True, compare_paths=None):
+def run_verify(fcst_paths, obs_path, stn, coef_path="rs_coef.csv", analysis=True, compare_paths=None,
+               s4_coef_path=None, grid=None):
     """검증 전체 계산. analysis=True면 오차분해·편향보정 탐색까지.
-       compare_paths: 비교할 다른 격자의 과거 예보(같은 관측·계수·Kc로 계산해 격자 차이를 봄)"""
+       compare_paths: 비교할 다른 격자의 과거 예보(같은 관측·계수·Kc로 계산해 격자 차이를 봄)
+       s4_coef_path : 다른 해 운영 S4 계수 파일(rs_sky_coef.csv). 주면 교차검증 대신 그 계수를 고정 적용(독립 연도 검증)
+       grid         : 파일에 격자 정보가 없을 때(요소별 KST CSV) 쓸 격자 'nx_ny'"""
     obs, meta = load_obs(obs_path)
     lon = STATION_LON.get(str(stn))
     arch = load_archive(fcst_paths)
+    grid_given = None
+    if grid and not arch.location:              # 요소별 KST CSV에는 격자 정보가 없음 → 사용자가 준 격자
+        arch.location.add(grid)
+        grid_given = grid
     rep = check_archive(arch)
     st = service_table(arch, lat=meta["lat"], lon=lon)
     coef = load_coef(stn, coef_file(coef_path))
     kp = kc_params(meta["settings"])
-    ft = forecast_table(st, obs, meta["lat"], meta["elev"], coef, kp)
+    s4_fixed = load_s4_fixed(stn, s4_coef_path) if s4_coef_path else None
+    ft = forecast_table(st, obs, meta["lat"], meta["elev"], coef, kp, s4_fixed)
     s4_table = ft.attrs.get("s4_table")
     df, dropped = split_verifiable(ft)
     name, grid = STATIONS.get(str(stn), ("", ""))
     c3, _ = cum3(df)
+    h1_start = pd.Timestamp(kp["bud"]) if kp.get("bud") else df.target.min()
     res = dict(stn=str(stn), stn_name=name, stn_grid=grid, arch=arch, check=rep, table=df, obs=obs, meta=meta,
                coef=coef, kp=kp, dropped=dropped, skipped_runs=list(getattr(arch, "skipped_runs", [])),
                cum3_runs=set(zip(c3.run_name, c3.run)) if len(c3) else set(), main=main_method(df),
-               h1_start=pd.Timestamp(kp["bud"]) if kp.get("bud") else df.target.min(), h1_end=obs.date.max())
+               h1_start=h1_start, h1_end=min(obs.date.max(), pd.Timestamp(h1_start.year, 9, 30)),   # H1은 생육기(~9/30)
+               s4_fixed=s4_fixed, s4_coef_path=s4_coef_path, grid_given=grid_given)
     if res["main"] == "S4":
         res["s4_table"] = s4_table
         res["s4_all"] = s4_fit_all(df)
@@ -535,7 +578,7 @@ def run_verify(fcst_paths, obs_path, stn, coef_path="rs_coef.csv", analysis=True
     if compare_paths:
         arch2 = load_archive(compare_paths)
         df2, _ = split_verifiable(forecast_table(service_table(arch2, lat=meta["lat"], lon=lon), obs, meta["lat"],
-                                                 meta["elev"], coef, kp))
+                                                 meta["elev"], coef, kp, s4_fixed))
         res["compare"] = dict(check=check_archive(arch2), table=df2)
         res["grid_cmp"] = grid_comparison(df, df2)
     if analysis:
@@ -572,6 +615,16 @@ def grid_comparison(df, df2):
     return dict(metrics=met, diag=diag, diff=diff, by_month=by_month, rain_agree=agree, n=len(j))
 
 
+def s4_label(res):
+    """S4 계수 방식 설명(해석 문장·CLI용)"""
+    if res.get("s4_fixed") is not None:
+        f = res["s4_fixed"]
+        per = f"{f.fit_start.min()}~{f.fit_end.max()}" if "fit_start" in f and str(f.fit_start.min()) else ""
+        return f"다른 해 운영 계수 고정({os.path.basename(str(res.get('s4_coef_path') or 'rs_sky_coef.csv'))}" \
+               + (f", 적합 {per})" if per else ")")
+    return "월 단위 교차검증 계수"
+
+
 def findings(res):
     """요약 시트의 해석 문장(④~). 수식으로 연결할 수 없는 Python 분석 결과와 자료 조건 경고.
        순서: 판정 불확실성 → 월별 약점 → 오차 원인 → 보정 탐색 → 격자·자료 조건"""
@@ -584,7 +637,8 @@ def findings(res):
         m4, m3 = mon("ETo_S4"), mon("ETo_S3")
         better = [int(x) for x in m4.index if m4[x] < m3[x] - 0.02]
         worse = [int(x) for x in m4.index if m4[x] > m3[x] + 0.02]
-        txt = (f"하늘상태 반영(S4, 월 단위 교차검증 계수) — 같은 대상일의 S3(하늘상태 없음)와 비교: D+1 RMSE 아침 "
+        lab = s4_label(res)
+        txt = (f"하늘상태 반영(S4, {lab}) — 같은 대상일의 S3(하늘상태 없음)와 비교: D+1 RMSE 아침 "
                f"{r1('S3', '아침'):.2f}→{r1('S4', '아침'):.2f}, 저녁 {r1('S3', '저녁'):.2f}→{r1('S4', '저녁'):.2f} mm/일")
         if better:
             txt += f". D+1이 좋아진 달 {'·'.join(map(str, better))}월"
@@ -701,6 +755,9 @@ def main(argv=None):
     v.add_argument("--stn", required=True); v.add_argument("--coef", default="rs_coef.csv")
     v.add_argument("--out", default=None)
     v.add_argument("--compare", nargs="+", default=None, help="비교할 다른 격자의 과거 예보 CSV 폴더(또는 파일들)")
+    v.add_argument("--s4-coef", default=None,
+                   help="다른 해 운영 S4 계수 파일(rs_sky_coef.csv) — 주면 교차검증 대신 고정 적용(독립 연도 검증)")
+    v.add_argument("--grid", default=None, help="파일에 격자 정보가 없을 때(요소별 KST CSV) 격자 nx_ny, 예: 73_134")
     k = sub.add_parser("calib-sky", help="하늘상태 포함 과거 예보 + 관측으로 운영용 S4 계수(선행일별) → rs_sky_coef.csv")
     k.add_argument("--fcst", nargs="+", required=True); k.add_argument("--obs", required=True)
     k.add_argument("--stn", required=True); k.add_argument("--coef", default="rs_coef.csv")
@@ -726,14 +783,20 @@ def main(argv=None):
         print(f"[저장] {a.coef}")
         return
 
-    res = run_verify(a.fcst, a.obs, a.stn, a.coef, compare_paths=a.compare)
+    res = run_verify(a.fcst, a.obs, a.stn, a.coef, compare_paths=a.compare, s4_coef_path=a.s4_coef, grid=a.grid)
     df = res["table"]
     met = lead_metrics(df)
     chk = res["check"]
     print(f"[예보] {'+'.join(chk.get('formats', []))} 격자 {chk['location']}, 발표 {chk.get('issues')}회, "
           f"누락 {len(chk.get('missing_issues', []))}회, 일부만 있는 발표 {len({t for t, *_ in chk.get('short_issues', [])})}회")
     print(f"[Rs 계수] {res['coef']['source']}")
-    print(f"[주 방법] {res['main']}" + (" (하늘상태 포함, 월 단위 교차검증 계수)" if res["main"] == "S4" else ""))
+    print(f"[주 방법] {res['main']}" + (f" (하늘상태 포함, {s4_label(res)})" if res["main"] == "S4" else ""))
+    for e in chk.get("missing_elements", []):
+        print(f"[경고] 필수 요소 {e} 파일이 없습니다 → 모든 행이 '예보 입력 결측'으로 빠집니다")
+    for f, e in chk.get("ignored_files", []):
+        print(f"[참고] 쓰지 않는 요소({e}) 파일을 건너뜀: {f}")
+    if res.get("grid_given"):
+        print(f"[참고] 파일에 격자 정보가 없어 --grid {res['grid_given']}로 기록")
     if res["coef"].get("a") is None:
         print(f"[경고] {a.coef}에 지점 {a.stn}의 S3 계수가 없어 FAO-56 기본값(S1)으로 계산했습니다. calib를 먼저 실행하세요")
     print(met.round(3).to_string(index=False))

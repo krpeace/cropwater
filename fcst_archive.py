@@ -44,6 +44,13 @@ fcst_archive.py — 과거 단기예보 CSV 파서(기상자료개방포털 · O
   - PCP 문자열: "강수없음" 0, "1mm 미만" PCP_LT1_MM, "30.0~50.0mm" 40, "50.0mm 이상" 50, "3.0mm" 3.
     숫자로만 온 값(글피 1시간 칸의 0.1~ 소수, 연장기간 코드 0~3)은 그대로
   - 빈 줄(',,,,,,,')·반복된 머리행은 건너뛰고, 같은 발표·요소·예보시각이 두 번 있으면 뒤의 값을 쓴다
+
+[요소별 KST CSV] 요소마다 1파일, 일시는 KST, 값 표기는 OpenAPI와 같다(강수 문자열, lead +1부터).
+  발표일,발표시각,예보일,예보시각,값
+  20250401,0200,20250401,0300,4
+  - 요소: 파일명 키워드 → 없으면 값으로 판별(TMN은 예보시각 06시만, TMX는 15시만, 강수는 '강수없음' 등 문자열,
+    음수가 섞인 소수는 바람성분 UUU·VVV). 쓰지 않는 요소(UUU·VVV·VEC·PTY·SNO·WAV) 파일은 건너뛰고 기록한다
+[인코딩] UTF-8(BOM 포함)이 아니면 CP949(엑셀 저장본)로 읽는다
 """
 import csv, datetime as dt, math, os, re
 from collections import defaultdict
@@ -56,7 +63,10 @@ OPTIONAL = ("SKY", "POP")                              # 선택: 하늘상태, �
 SKY_VALID = (1.0, 3.0, 4.0)                            # 하늘상태 코드: 1 맑음, 3 구름많음, 4 흐림
 # 파일명 키워드 (포털 기본 파일명: 지역_요소명_시작일_종료일.csv). 순서가 중요: '최고기온'·'최저기온'을 '기온'보다 먼저 검사
 _KEYWORDS = [("TMX", ("최고기온",)), ("TMN", ("최저기온",)), ("PCP", ("강수량",)), ("POP", ("강수확률",)),
-             ("SKY", ("하늘상태",)), ("REH", ("습도",)), ("WSD", ("풍속",)), ("TMP", ("1시간기온", "기온"))]
+             ("SKY", ("하늘상태",)), ("REH", ("습도",)), ("WSD", ("풍속",)),
+             ("UUU", ("동서바람성분",)), ("VVV", ("남북바람성분",)), ("VEC", ("풍향",)), ("PTY", ("강수형태",)),
+             ("SNO", ("적설",)), ("WAV", ("파고",)), ("TMP", ("1시간기온", "기온"))]
+USED = ("TMX", "TMN", "TMP", "REH", "WSD", "PCP", "SKY", "POP")   # 읽어 쓰는 요소(필수 6 + 선택 2)
 WSD_CODE = {2: 6.5, 3: 11.0}          # 코드 1은 직전 정량일 평균(최대 3.9)으로 대체
 WSD_CODE1_CAP = 3.9
 PCP_CODE_MMH = {1: 1.5, 2: 9.0, 3: 20.0}
@@ -64,6 +74,7 @@ RAIN_FLAG_MM = 1.0
 MISSING_ABS = 900.0                   # 활용가이드: +900 이상 / −900 이하는 결측 (포털 CSV는 −999.9)
 # OpenAPI 강수 문자열 → mm/h (ARCHITECTURE 7장 '강수 문자열'). 포털 과거자료는 정수 mm라 '1mm 미만'이 0으로 보임
 API_COLS = ("baseDate", "baseTime", "category", "fcstDate", "fcstTime", "fcstValue")
+KST_COLS = ("발표일", "발표시각", "예보일", "예보시각", "값")
 PCP_LT1_MM = 0.5                      # "1mm 미만" (0.1~0.9 mm)
 PCP_30_50_MM = 40.0                   # "30.0~50.0mm"
 PCP_GE50_MM = 50.0                    # "50.0mm 이상"
@@ -111,12 +122,22 @@ def read_portal_csv(path):
     return loc, df
 
 
-def detect_element(path, df):
-    """파일명 키워드 → 없으면 값 분포로 요소 판별"""
+def keyword_element(path):
+    """파일명 키워드로 요소 판별(없으면 None). 업로드 과정에서 한글 파일명이 '_'로 바뀌면 판별하지 못함"""
     name = os.path.basename(path)
     for elem, keys in _KEYWORDS:
         if any(k in name for k in keys):
             return elem
+    return None
+
+
+def detect_element(path, df):
+    """파일명 키워드 → 없으면 값 분포로 요소 판별"""
+    return keyword_element(path) or _detect_values(df)
+
+
+def _detect_values(df):
+    """값 분포로 요소 판별. df: issue, forecast, value"""
     per_issue = df.groupby("issue").size()
     v = df["value"]
     if per_issue.max() <= 4:                             # 일 요소: 대상일 수(3행) 패턴으로 구분
@@ -129,8 +150,12 @@ def detect_element(path, df):
     r = v.round(6)
     if r.isin(SKY_VALID).mean() > 0.99 and r.isin(SKY_VALID + (0.0, 2.0)).all():
         return "SKY"                                     # 하늘상태: 코드 1·3·4 (드물게 잘못된 0)
-    if (r % 10 == 0).all() and v.min() == 0 and v.max() <= 100 and v.max() >= 20 and (v > 0).mean() > 0.05:
-        return "POP"                                     # 강수확률: 10% 단위, 0 포함 (습도보다 먼저 검사)
+    nz = r[r > 0]
+    if len(nz) and v.min() == 0 and v.max() <= 100 and v.max() >= 20 and (v > 0).mean() > 0.05 \
+            and (nz % 10 == 0).mean() > 0.9:
+        return "POP"                                     # 강수확률: 0 포함, 0이 아닌 값은 거의 10% 단위(API 글피 칸에 66 등 드물게)
+    if v.min() >= 0 and v.max() > 100:
+        return "VEC"                                     # 풍향: 0~360°
     if (v.round(6) % 5 == 0).mean() > 0.99 and v.min() >= 0 and v.max() <= 100 and v.mean() > 20:
         return "REH"                                     # 습도: 5% 단위, 0~100
     if v.min() >= 0 and v.median() == 0:
@@ -140,14 +165,36 @@ def detect_element(path, df):
     return "TMP"                                         # 기온: 정수 ℃
 
 
-def is_openapi_csv(path):
-    """첫 줄(빈 줄 제외)이 OpenAPI 응답 열 이름(baseDate, …, fcstValue)이면 True"""
-    with open(path, encoding="utf-8-sig", errors="replace") as f:
+def _encoding(path):
+    """UTF-8(BOM 포함)로 읽히면 'utf-8-sig', 아니면 'cp949'(한글 엑셀에서 CSV로 저장한 파일)"""
+    with open(path, "rb") as f:
+        b = f.read(1 << 16)
+    try:
+        b.decode("utf-8")
+    except UnicodeDecodeError as e:
+        if e.start < len(b) - 3:                         # 끝에서 잘린 글자가 아니면 UTF-8이 아님
+            return "cp949"
+    return "utf-8-sig"
+
+
+def csv_format(path):
+    """첫 줄(빈 줄 제외)로 파일 형식 판별: 'openapi'(응답 열 이름) / 'element'(발표일·…·값) / 'portal'"""
+    with open(path, encoding=_encoding(path), errors="replace") as f:
         for line in f:
             s = line.strip().lstrip("\ufeff").replace('"', "")
             if s:
-                return all(c in s.split(",") for c in API_COLS)
-    return False
+                cols = [c.strip() for c in s.split(",")]
+                if all(c in cols for c in API_COLS):
+                    return "openapi"
+                if all(c in cols for c in KST_COLS):
+                    return "element"
+                return "portal"
+    return "portal"
+
+
+def is_openapi_csv(path):
+    """첫 줄(빈 줄 제외)이 OpenAPI 응답 열 이름(baseDate, …, fcstValue)이면 True"""
+    return csv_format(path) == "openapi"
 
 
 def pcp_mm(s):
@@ -172,7 +219,7 @@ def read_openapi_csv(path, elements=ELEMENTS + OPTIONAL):
        1시간 요소: DataFrame[issue, forecast(= lead h), value] — read_portal_csv와 같은 모양
        TMX·TMN : DataFrame[issue, target_date, value] (대상일 = fcstDate)
        결측(|값| ≥ 900, 읽을 수 없는 값) 행은 버리고 개수를 df.attrs["n_missing"]에 남긴다."""
-    d = pd.read_csv(path, encoding="utf-8-sig", dtype=str, skipinitialspace=True)
+    d = pd.read_csv(path, encoding=_encoding(path), dtype=str, skipinitialspace=True)
     d.columns = [c.strip().lstrip("\ufeff") for c in d.columns]
     d = d.dropna(subset=["baseDate", "category"])
     d = d[d["baseDate"].str.strip() != "baseDate"]                 # 파일을 이어 붙일 때 반복된 머리행
@@ -204,6 +251,55 @@ def read_openapi_csv(path, elements=ELEMENTS + OPTIONAL):
     return locs, out
 
 
+def _detect_kst(raw, num, df, target):
+    """요소별 KST CSV의 요소를 값으로 판별. raw: 문자열 값, num: 숫자로 바꾼 값, df: issue·forecast·value"""
+    h = target.dt.hour
+    if h.nunique() == 1 and h.iloc[0] in (6, 15):
+        return "TMN" if h.iloc[0] == 6 else "TMX"         # 하루 1칸: 최저 06시, 최고 15시
+    txt = raw[num.isna()]
+    if txt.str.contains("강수|mm").any():
+        return "PCP"                                     # '강수없음', '1mm 미만', '2.0mm' …
+    if txt.str.contains("적설|cm").any():
+        return "SNO"
+    v = num.dropna()
+    if not len(v) or (v.abs() >= MISSING_ABS).mean() > 0.99:
+        return "WAV"                                     # 전부 결측(−999): 육지 격자의 파고
+    v = v[v.abs() < MISSING_ABS]
+    if (v < 0).mean() > 0.05 and (v.round(0) != v).mean() > 0.2:
+        return "UUU/VVV"                                 # 음수가 섞인 소수: 동서·남북 바람성분(값으로는 둘을 구분 못 함)
+    if v.isin([0, 1, 2, 3, 4]).all() and (v == 0).mean() > 0.5:
+        return "PTY"                                     # 강수형태 코드 0~4 (강수는 문자열이라 여기 오지 않음)
+    return _detect_values(df.assign(value=num).dropna(subset=["value"]))
+
+
+def read_element_csv(path, element=None):
+    """요소별 KST CSV 1개(발표일,발표시각,예보일,예보시각,값) → (요소, DataFrame)
+       1시간 요소: [issue, forecast(= lead h), value], TMX·TMN: [issue, target_date, value].
+       요소는 element → 파일명 키워드 → 값 분포 순으로 정한다. 결측(|값| ≥ 900, 읽을 수 없는 값)은 버리고 개수를 attrs에."""
+    d = pd.read_csv(path, encoding=_encoding(path), dtype=str, skipinitialspace=True)
+    d.columns = [c.strip().lstrip("\ufeff") for c in d.columns]
+    d = d.dropna(subset=["발표일", "값"])
+    d = d[d["발표일"].str.strip() != "발표일"]                      # 이어 붙인 파일의 반복된 머리행
+    d = d.assign(**{c: d[c].str.strip() for c in KST_COLS})
+    d = d.drop_duplicates(["발표일", "발표시각", "예보일", "예보시각"], keep="last")
+    issue = pd.to_datetime(d["발표일"] + d["발표시각"].str.zfill(4), format="%Y%m%d%H%M")
+    target = pd.to_datetime(d["예보일"] + d["예보시각"].str.zfill(4), format="%Y%m%d%H%M")
+    raw = d["값"]
+    num = pd.to_numeric(raw, errors="coerce")
+    lead = ((target - issue) / pd.Timedelta(hours=1)).round().astype(int)
+    elem = element or keyword_element(path) or _detect_kst(
+        raw, num, pd.DataFrame({"issue": issue.values, "forecast": lead.values}), target)
+    v = raw.map({x: pcp_mm(x) for x in raw.unique()}).astype(float) if elem == "PCP" else num
+    bad = (v.isna() | (v.abs() >= MISSING_ABS)).values
+    if elem in ("TMX", "TMN"):
+        df = pd.DataFrame({"issue": issue[~bad].values, "target_date": target[~bad].dt.normalize().values,
+                           "value": v[~bad].values})
+    else:
+        df = pd.DataFrame({"issue": issue[~bad].values, "forecast": lead[~bad].values, "value": v[~bad].values})
+    df.attrs["n_missing"] = int(bad.sum())
+    return elem, df.reset_index(drop=True)
+
+
 # ── 아카이브 ───────────────────────────────────────────────────────────
 class Archive:
     """요소별 과거 예보 묶음. hourly[elem]: issue, lead, target, value, code(bool); daily[elem]: issue, target_date, value"""
@@ -212,7 +308,8 @@ class Archive:
         self.hourly, self.daily, self.location, self.files = {}, {}, set(), defaultdict(list)
         self.n_missing = defaultdict(int)        # 요소별 결측값(±900) 행 수
         self.spans = defaultdict(list)           # 요소별 파일의 (첫 발표, 마지막 발표, 파일명) — 판별 중복 확인용
-        self.formats = set()                     # 읽은 파일 형식: "portal"(기상자료개방포털) / "openapi"(조회서비스 응답)
+        self.formats = set()                     # 읽은 파일 형식: "portal"(기상자료개방포털) / "openapi"(조회서비스 응답) / "element"(요소별 KST)
+        self.ignored = []                        # 쓰지 않는 요소라 건너뛴 파일: (파일명, 요소)
 
     @property
     def issues(self):
@@ -245,20 +342,27 @@ class Archive:
         return sorted(set.intersection(*sets)) if sets else []
 
     def add_file(self, path, element=None):
-        """CSV 1개를 더한다. 반환: 요소 이름(포털 파일) 또는 요소 이름 튜플(OpenAPI 파일 — 한 파일에 여러 요소)"""
+        """CSV 1개를 더한다. 반환: 요소 이름(요소별 파일) 또는 요소 이름 튜플(OpenAPI 파일 — 한 파일에 여러 요소).
+           쓰지 않는 요소(UUU·VVV 등)의 파일은 저장하지 않고 self.ignored에 남긴다."""
         self._iss_cache = {}
-        if is_openapi_csv(path):
+        fmt = csv_format(path)
+        self.formats.add(fmt)
+        if fmt == "openapi":
             locs, tables = read_openapi_csv(path)
             self.location |= locs
-            self.formats.add("openapi")
             for elem, df in tables.items():
                 self._store(elem, df, path)
             return tuple(tables)
-        loc, df = read_portal_csv(path)
-        elem = element or detect_element(path, df)
-        if loc:
-            self.location.add(loc)
-        self.formats.add("portal")
+        if fmt == "element":
+            elem, df = read_element_csv(path, element)
+        else:
+            loc, df = read_portal_csv(path)
+            elem = element or detect_element(path, df)
+            if loc:
+                self.location.add(loc)
+        if elem not in USED:
+            self.ignored.append((os.path.basename(path), elem))
+            return elem
         self._store(elem, df, path)
         return elem
 
@@ -320,7 +424,9 @@ def load_archive(paths, elements=None):
 def check_archive(arch):
     """G1 점검용 구조 확인 결과(dict). 발표 누락, 요소별 발표당 행수 패턴, 격자 일관성."""
     rep = {"location": sorted(arch.location), "elements": {e: len(arch.files[e]) for e in arch.files},
-           "formats": sorted(getattr(arch, "formats", set()))}
+           "formats": sorted(getattr(arch, "formats", set())),
+           "missing_elements": [e for e in ELEMENTS if e not in arch.hourly and e not in arch.daily],
+           "ignored_files": list(getattr(arch, "ignored", []))}
     iss = arch.required_issues
     if iss:
         full = pd.date_range(iss[0], iss[-1], freq="3h")

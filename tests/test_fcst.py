@@ -499,3 +499,90 @@ def test_check_archive_reports_partial_issue(tmp_path):
     p.write_text(txt, encoding="utf-8")
     a = Archive(); a.add_file(str(p))
     assert check_archive(a)["short_issues"] == [("2025-04-03 02:00:00", "TMP", 3, 5)]
+
+
+# ── 요소별 KST CSV (발표일,발표시각,예보일,예보시각,값) · 다른 해 고정 계수 ──────────────
+KST_HDR = "발표일,발표시각,예보일,예보시각,값\n"
+
+
+def _kst(rows):
+    """rows: [(발표시각, 예보시각, 값)] → 요소별 KST CSV 줄들"""
+    return "".join(f"{TS(i):%Y%m%d},{TS(i):%H%M},{TS(t):%Y%m%d},{TS(t):%H%M},{v}\n" for i, t, v in rows)
+
+
+def _kst_hourly(values, hours=range(3, 24), days=("2025-06-01", "2025-06-02")):
+    rows = []
+    for d in days:
+        for k, h in enumerate(hours):
+            rows.append((f"{d} 02:00", f"{d} {h:02d}:00", values[k % len(values)]))
+    return rows
+
+
+def test_element_csv_format_detection_and_values(tmp_path):
+    from fcst_archive import csv_format, read_element_csv
+    pop = [0, 0, 30, 60, 20, 0, 30, 0, 20, 60, 0, 30, 20, 0, 60, 30, 0, 20, 30, 66, 0]      # 66 같은 값은 드묾
+    cases = {"SKY": [1, 3, 4, 4, 1], "POP": pop, "REH": [55, 60, 75, 85, 90, 95],
+             "TMP": [12, 15, 18, 21, 23, -1], "WSD": [0.8, 1.3, 2.6, 3.1, 1.7],
+             "PCP": ["강수없음", "강수없음", "1mm 미만", "2.0mm", "강수없음"], "UUU/VVV": [-0.2, 0.5, -1.3, 2.1, -0.7]}
+    for elem, vals in cases.items():
+        p = tmp_path / f"x_{len(elem)}.csv"
+        p.write_text("﻿" + KST_HDR + _kst(_kst_hourly(vals)), encoding="utf-8")
+        assert csv_format(p) == "element"
+        e, df = read_element_csv(p)
+        assert e == elem, (elem, e)
+        if elem == "PCP":
+            assert sorted(set(df.value)) == [0.0, 0.5, 2.0]
+    # 하루 1칸 요소: 06시 → TMN, 15시 → TMX (대상일 = 예보일)
+    p = tmp_path / "d.csv"
+    p.write_text(KST_HDR + _kst([("2025-06-01 02:00", "2025-06-01 06:00", 14.0), ("2025-06-01 02:00", "2025-06-02 06:00", 15.0)]),
+                 encoding="utf-8")
+    e, df = read_element_csv(p)
+    assert e == "TMN" and list(df.target_date) == [TS("2025-06-01"), TS("2025-06-02")]
+    # 한글 엑셀 저장본(CP949)도 읽음
+    q = tmp_path / "cp949.csv"
+    q.write_bytes((KST_HDR + _kst(_kst_hourly(cases["PCP"]))).encode("cp949"))
+    assert csv_format(q) == "element" and read_element_csv(q)[0] == "PCP"
+
+
+def test_archive_element_files_skip_unused_and_report_missing(tmp_path):
+    from fcst_archive import check_archive
+    d = tmp_path / "f"; d.mkdir()
+    (d / "a.csv").write_text(KST_HDR + _kst(_kst_hourly([12, 15, 18, 21, 23])), encoding="utf-8")        # TMP
+    (d / "b.csv").write_text(KST_HDR + _kst(_kst_hourly([-0.2, 0.5, -1.3, 2.1])), encoding="utf-8")      # UUU/VVV
+    from fcst_archive import load_archive
+    a = load_archive([str(d)])
+    rep = check_archive(a)
+    assert "TMP" in a.hourly and rep["formats"] == ["element"] and rep["ignored_files"] == [("b.csv", "UUU/VVV")]
+    assert "WSD" in rep["missing_elements"] and "TMP" not in rep["missing_elements"]
+
+
+def test_forecast_table_fixed_s4_coefficients():
+    from cropwater_fcst import S4_FIXED, bias_correction_cv, forecast_table, s4_is_fixed
+    from rs_model import rs_s4
+    rng = np.random.default_rng(3)
+    rows = []
+    for day in pd.date_range("2025-04-02", "2025-05-31"):
+        for k in (1, 2):
+            tx = 20 + 6 * rng.random()
+            rows.append(dict(run_name="아침", run=day - pd.Timedelta(days=k) + pd.Timedelta(hours=2), target=day, lead_day=k,
+                             Tmax=tx, Tmin=tx - 9, ea=1.2, u10=1.5, rain=0.0, rain_flag=0, sky_cloudy=0.3 * rng.random(),
+                             sky_overcast=0.3 * rng.random(), pop=0.1, pop_max=0.2))
+    st = pd.DataFrame(rows)
+    dates = pd.date_range("2025-03-20", "2025-06-05")
+    obs = pd.DataFrame(dict(date=dates, ETo_obs=3 + rng.random(len(dates)), Tmax=24.0, Tmin=13.0, ea_obs=1.1, u10=1.4,
+                            Rs=18.0, rain=0.0, pa=np.nan))
+    fixed = pd.DataFrame(dict(lead_day=[1, 2], a=[0.25, 0.30], b=[0.11, 0.10], c=[-0.04, -0.12], d=[-0.09, -0.13],
+                              e=[-0.23, -0.17], n=[320, 320], fit_start="2026-04-02", fit_end="2026-09-18", note=""))
+    kp = kc_params({"시나리오 번호 (1~4)": 3, "생육 시작일 (발아기/정식일)": pd.Timestamp("2025-04-01"),
+                    "L_ini (초기, 일)": 20, "L_dev (발육, 일)": 70, "L_mid (중기, 일)": 90, "L_late (후기, 일)": 30,
+                    "생육중기 초목 수고 h (m)": 3.2, "중기 평균 u2 (m/s)": 1.0, "중기 평균 RHmin (%)": 55,
+                    "후기 평균 u2 (m/s)": 1.5, "후기 평균 RHmin (%)": 55, "멀칭 Kc 보정계수": 1})
+    df = forecast_table(st, obs, 37.9, 76.5, dict(a=None), kp, fixed)
+    assert s4_is_fixed(df) and set(df.s4_fold) == {S4_FIXED}
+    k1 = df[df.lead_day == 1]
+    exp = rs_s4(k1.Tmax, k1.Tmin, k1.rain_flag, k1.sky_cloudy, k1.sky_overcast, k1.Ra, k1.Rso, fixed.iloc[0][["a", "b", "c", "d", "e"]].to_numpy(float))
+    assert np.allclose(k1.Rs_S4, exp)
+    assert list(df.attrs["s4_table"].fold.unique()) == [S4_FIXED]
+    # 보정 탐색: 고정 계수면 중첩 교차검증이 필요 없어 대상월 2개로도 ETo 비율 보정을 구함
+    m, _, folds, rows = bias_correction_cv(df, 37.9, 76.5, dict(a=None))
+    assert folds == ["2025-04", "2025-05"] and rows["B3"].notna().all()

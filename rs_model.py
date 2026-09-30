@@ -129,7 +129,7 @@ def load_coef(stn, path=RS_COEF_DEFAULT):
     num = lambda k: float(r[k]) if r.get(k) not in (None, "") else None
     return dict(method=r.get("method") or ("S3" if num("a") is not None else "S1"), krs=num("krs") or 0.16,
                 a=num("a"), b=num("b"), c=num("c"),
-                source=f"rs_coef.csv stn={r.get('stn')} ({r.get('fit_start', '')}~{r.get('fit_end', '')})",
+                source=f"{os.path.basename(path)} stn={r.get('stn')} ({r.get('fit_start', '')}~{r.get('fit_end', '')})",
                 stn=r.get("stn"), fit_start=r.get("fit_start", ""), fit_end=r.get("fit_end", ""),
                 n=r.get("n", ""), rmse_rs=num("rmse_rs"), note=r.get("note", ""))
 
