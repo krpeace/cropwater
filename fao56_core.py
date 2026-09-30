@@ -141,6 +141,24 @@ def wb_step(dr_prev, P, etc, taw, raw, irr_net=0.0):
     dr = min(max(dr_prev - P - irr_net + etc_adj + dp, 0.0), taw)       # [식85·86]
     return ks, etc_adj, dp, dr
 
+# ── 관측 결측일 (VALIDATION #20, 2026-09-30 사용자 결정) ─────────────────
+# 01-Cycle은 예보 자료가 없으므로, 빠진 날짜의 행을 넣고 '결측'으로 표시한 뒤
+# ETo = 앞 7일 ETo 평균, 강수 = 0 으로 물수지를 이어 간다. (02-Cycle 예보 물수지는 그날 아침 발표 D+0 예보로 채움)
+FILL_DAYS = 7
+
+def missing_dates(dates):
+    """날짜 목록의 첫날~끝날 사이에 빠진 날짜(오름차순). 끝날 뒤(아직 발표 전인 날)는 넣지 않는다."""
+    ds = sorted(set(dates))
+    out = []
+    for a, b in zip(ds, ds[1:]):
+        out += [a + dt.timedelta(days=k) for k in range(1, (b - a).days)]
+    return out
+
+def prev_mean(vals, i, n=FILL_DAYS):
+    """vals[i] 앞 n개 값(None 제외)의 평균. 앞에 값이 없으면 None."""
+    w = [v for v in vals[max(0, i - n):i] if v is not None]
+    return sum(w) / len(w) if w else None
+
 def load_irrigation_log(path):
     """관수 기록 CSV → {datetime.date: 공급 관수량(mm)}.
        머리행에 날짜 열(날짜/일자/date)과 관수량 열(관수량·mm·amount가 들어간 이름)이 있어야 한다. 메모 등 다른 열은 무시.

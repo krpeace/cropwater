@@ -36,7 +36,7 @@ from fao56_core import (num, fetch_asos as _fetch_asos_raw, fetch_station_table,
                          KC_SCENARIOS, KCB_SCENARIOS, kc_climate_adjust,
                          stage_of_date, kc_of_date,
                          load_crop_library, crops_sorted,
-                         wind_2m, load_irrigation_log)   # ← 공통 모듈(같은 폴더 필요)
+                         wind_2m, load_irrigation_log, missing_dates, FILL_DAYS)   # ← 공통 모듈(같은 폴더 필요)
 
 FONT="맑은 고딕"; GREEN="2E6A4C"; BLUE="2B6E86"; BROWN="A8681B"; LIGHT="EFF1EC"; YEL="FBEED2"; WARN="F4C7B8"
 thin=Side(style="thin",color="D0D3CC"); BORDER=Border(thin,thin,thin,thin)
@@ -64,7 +64,25 @@ def fetch_asos(key,stn,start,end):
             sumRn=num(x.get("sumRn"))))
     return out
 
+def row_missing(r):
+    """ETo 필수 입력이 빈 날: 최고·최저기온, 풍속, 습도(증기압·이슬점·상대습도 중 하나), 일사(합계일사·일조 중 하나)"""
+    g = lambda k: r.get(k) is not None
+    return not (g("maxTa") and g("minTa") and g("avgWs") and (g("avgPv") or g("avgTd") or g("avgRhm"))
+                and (g("sumGsr") or g("sumSsHr")))
+
+def complete_rows(rows):
+    """관측 결측일 처리(VALIDATION #20): 첫날~끝날 사이에 빠진 날짜의 행을 넣고, ETo 필수 입력이 빈 날을 표시.
+       반환 (날짜순 rows, {날짜: 사유}). 결측일의 ETo는 계산과정 시트에서 앞 7일 평균, 강수는 관측값(없으면 0)."""
+    rows = sorted(rows, key=lambda r: r["tm"])
+    add = [dict(tm=d) for d in missing_dates([r["tm"] for r in rows])]
+    miss = {r["tm"]: "결측 — 행 없음(날짜 추가)" for r in add}
+    for r in rows:
+        if row_missing(r):
+            miss[r["tm"]] = "결측 — 관측 빈 칸"
+    return sorted(rows + add, key=lambda r: r["tm"]), miss
+
 def build_workbook(rows, p, out):
+    rows, miss = complete_rows(rows)
     n=len(rows); last=n+1; S="원데이터"
     wb=Workbook()
 
@@ -261,12 +279,18 @@ def build_workbook(rows, p, out):
           ("합계일조(hr)","sumSsHr","0.0"),("대형증발량(mm)","sumLrgEv","0.0"),
           ("일강수량(mm)","sumRn","0.0")]   # 참조용(ETo 계산에는 미사용). 맨끝 열이라 계산과정 참조 불변
     for c,(h,_,_) in enumerate(cols,1): H(ws,1,c,h,GREEN,True)
+    MC=len(cols)+1                                   # 결측 표시 열(O) — 계산에는 쓰지 않음(#20)
+    H(ws,1,MC,"결측 (ETo = 앞 7일 평균)",WARN)
     for i,r in enumerate(rows,2):
         for c,(_,k,fmt) in enumerate(cols,1):
             v=r.get(k); cell=C(ws,i,c,v,fmt)
             if k=="tm": cell.number_format="yyyy-mm-dd"
+        if r["tm"] in miss:
+            ws.cell(i,1).fill=PatternFill("solid",fgColor=WARN)
+            C(ws,i,MC,miss[r["tm"]],left=True,fill=WARN)
     ws.freeze_panes="B2"; ws.column_dimensions["A"].width=12
     for c in range(2,len(cols)+1): ws.column_dimensions[get_column_letter(c)].width=11
+    ws.column_dimensions[get_column_letter(MC)].width=24
 
     # ===== 계산과정 (라이브 수식) =====
     ws=wb.create_sheet("계산과정")
@@ -331,8 +355,13 @@ def build_workbook(rows, p, out):
          27:f"=U{r}*W{r}",                    # ETc_PM  = ETo_PM × 일별 Kc
          28:f"=Z{r}*W{r}",                    # ETc_pan = ETo_pan × 일별 Kc  (ETo_pan은 Z26)
         }
+        is_miss = rows[i-2]["tm"] in miss
+        if is_miss:
+            # 관측 결측일(#20): 입력이 없으므로 PM 중간값·증발접시는 비우고, ETo = 앞 7일 ETo 평균(결측일 포함 이미 채운 값)
+            for c in list(range(3,21))+[24,25,26,28]: F[c]=None
+            F[21]=(f"=AVERAGE(U{max(2,r-FILL_DAYS)}:U{r-1})" if r>2 else 0)
         for c in range(1,29):
-            cell=C(ws,i,c,F[c],fmts[c-1])
+            cell=C(ws,i,c,F[c],fmts[c-1],fill=(WARN if is_miss and c in (1,21) else None))
             if c==1: cell.number_format="yyyy-mm-dd"
     ws.freeze_panes="B2"; ws.column_dimensions["A"].width=12
     for c in range(2,29): ws.column_dimensions[get_column_letter(c)].width=11
@@ -371,8 +400,9 @@ def build_workbook(rows, p, out):
     kv(23,"TAW (mm)",f"={KR['TAW']}","0.0")
     kv(24,"RAW (mm)",f"={KR['RAW']}","0.0")
     kv(25,"입력 관수량 합계 ΣI (mm, 공급)",f"=SUM(물수지!I2:I{last})","0.0")
+    kv(26,"관측 결측일 수 (ETo = 앞 7일 평균, 원데이터 O열)",f"=COUNTA({S}!O2:O{last})","0")
     # 일별표
-    rr=26
+    rr=27
     for c,h in enumerate(["일자","ETo_PM(mm)","ETo_pan(mm)","대형증발량(mm)","ETc_PM(mm)","강수(mm)","Dr(mm)","Ks","관수"],1): H(ws,rr,c,h,GREEN,True)
     for i in range(2,last+1):
         rr+=1
@@ -426,7 +456,8 @@ def build_workbook(rows, p, out):
             15: f'=IF(N{r}>0,N{r}/{_EA},0)',           # 총관수 Ig = In/Ea
         }
         for c in range(1, 16):
-            cell = C(ws, r, c, WF[c], wb_fmts[c-1], fill=(YEL if c == 9 else None))
+            cell = C(ws, r, c, WF[c], wb_fmts[c-1],
+                     fill=(YEL if c == 9 else (WARN if c in (1, 4) and day in miss else None)))
             if c == 1: cell.number_format = "yyyy-mm-dd"
             # Dr,i 열: RAW 초과 시 경고색
             if c == 12:
@@ -471,6 +502,7 @@ def build_workbook(rows, p, out):
          ("관수필요 판정","Dr,i ≥ RAW이면 관수 필요(●). 관수량을 입력하지 않으면 ● 이후에도 Dr이 계속 누적됨(무관수)."),
          ("필요 순관수량 In","net irrigation depth. 관수필요(●) 시점의 Dr 값. 근권을 포장용수량(Dr=0)까지 보충하는 데 필요한 순수량(mm). 이론적 필요량이며 실측 관수량이 아님."),
          ("필요 총관수량 Ig","gross irrigation depth. In을 관수효율 Ea로 나눈 값(Ig = In/Ea). 손실(미도달·증발 등)을 포함한 실제 공급 필요량. 점적관수 Ea=0.95 기준."),
+         ("관측 결측일","원데이터에 날짜가 빠졌거나 ETo 필수 입력(최고·최저기온, 풍속, 습도, 일사·일조)이 빈 날은 '결측'으로 표시(원데이터 O열, 분홍 칸). 빠진 날짜는 행을 넣음. 그날 ETo = 앞 7일 ETo 평균, 강수는 관측값이 없으면 0. 이전에는 빈 칸을 0으로 계산해 ETo가 작게 나왔음(VALIDATION #20)."),
          ("계산과정 시트","모든 셀이 라이브 수식. 셀 클릭 시 수식 확인 가능. 설정값 변경 시 자동 재계산됨."),
          ("물수지 시트","라이브 수식. 설정의 토양 파라미터(θFC/θWP/Zr/p)나 I열 관수량을 바꾸면 전체 자동 재계산됨."),
          ("주의","일사·대형증발량은 지점별 관측 여부 상이. 물수지는 RO(지표유출)=0, CR(모관상승)=0으로 단순화. 관수량을 입력하지 않으면 무관수(자연강우만) 가정.")]
@@ -645,6 +677,10 @@ def main():
            u2_mid=u2_mid_v,rh_mid=rh_mid_v,u2_end=u2_end_v,rh_end=rh_end_v,irrig=irrig)
     out=a.out if a.out!="eto_상세.xlsx" else f"output/eto({stn})_{crop_id}_{start}_{end}.xlsx"
     n,saved_path=build_workbook(rows,p,out)
+    _miss=complete_rows(rows)[1]
+    if _miss:
+        print(f"[관측 결측] {len(_miss)}일 — ETo는 앞 {FILL_DAYS}일 평균, 강수는 관측값(없으면 0)으로 물수지를 이어 감(원데이터 O열·분홍 칸): "
+              + ", ".join(f"{d:%m-%d}" for d in sorted(_miss)))
     print(f"[완료] {saved_path}  ({n}일)  → 시트: 설정 / 원데이터 / 계산과정(수식) / 결과요약 / 물수지 / 계산근거")
     print("  엑셀에서 열면 자동 계산됩니다. '설정' 시트의 노란칸(위도·고도 등)을 바꾸면 재계산돼요.")
     if is_short_cycle and not bud_date_manual:
