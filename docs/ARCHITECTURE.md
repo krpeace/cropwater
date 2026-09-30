@@ -370,7 +370,7 @@ Dr_end = min(Dr_after - I_net + ETc_adj, taw)
 | 모듈 | 역할 | 단계 | 상태 |
 | :--- | :--- | :---: | :---: |
 | `fcst_archive.py` | 과거 단기예보 CSV → 요소별 표(발표, 선행시간, 대상시각, 값, 코드 여부) → 서비스 발표(02·17시)별 일 입력. 입력 형식 세 가지를 첫 줄로 자동 판별(`csv_format`): 포털 CSV(요소별, 여러 달 파일 포함), OpenAPI 응답 CSV(한 파일에 모든 요소, `read_openapi_csv`), 요소별 KST CSV(`read_element_csv`). 쓰지 않는 요소 파일은 건너뛰고 기록. 선택 요소 SKY·POP은 낮 시간 일사 비중으로 가중한 일 값(`sun_weights`). `fcst_daily.py` 계획을 합침 | 1 | 구현 |
-| `rs_model.py` + `rs_coef.csv` + `rs_sky_coef.csv` | Rs 추정(S1 식50, S3 식50 + 강수유무, S4 + 하늘상태 구름 비율), 최소제곱 적합, 계수 2계층(stn=0 FAO 기본값 + 지점 행). S4는 지점 × 선행일 행 | 2·3 | 구현 |
+| `rs_model.py` + `rs_coef.csv` + `rs_sky_coef.csv` | Rs 추정(S1 식50, S3 식50 + 강수유무, S4 + 하늘상태 구름 비율), 최소제곱 적합, 계수 2계층(stn=0 FAO 기본값 + 지점 행). S4는 지점 × 선행일 행. `rs_coef.csv`는 2025년 관측 S3 계수(2026년 검증용), `rs_coef_2026.csv`는 2026년 관측 S3 계수(2025년 독립 검증용) | 2·3 | 구현 |
 | `obs_daily.py` | 01-Cycle 출력 워크북 → 관측 일자료, 관측 ETo(01-Cycle 규칙), Kc(설정 시트 값) | 2 | 구현 |
 | `cropwater_fcst.py` | CLI(`calib`, `calib-sky`, `verify`). 예보 ETo·ETc(주 방법 S4/S3, 비교 S1), S4 월 단위 교차검증 계수(`s4_cv`) 또는 다른 해 계수 고정(`--s4-coef`, `load_s4_fixed`), 기준선, 선행시간별 지표·H2 판정, 방법 비교, 월별 지표, 판정 불확실성(블록 부트스트랩), 입력 진단, 오차 분해, 보정 탐색 | 3 | 구현 |
 | `fcst_report.py` | H2 검증 엑셀 (라이브 수식). 일별비교 열 배치는 `daily_layout()`이 정하고 다른 시트는 열 키로 참조. 하늘상태가 있으면 SKY계수 시트·S4 열·방법 비교 표 추가 | 3 | 구현 |

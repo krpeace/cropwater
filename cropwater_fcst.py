@@ -708,9 +708,11 @@ def findings(res):
     na = [m for m in allv if m not in vals]       # 교차검증 학습 자료가 부족해 값을 못 구한 보정
     if vals:
         best = min(vals, key=vals.get)
+        gain = 1 - vals[best] / raw
         out.append(f"보정 탐색(월 단위 교차검증, D+1 두 발표 평균 RMSE {raw:.2f}): "
                    + ", ".join(f"{m} {v:.2f}" for m, v in vals.items())
-                   + f" mm/일 — 가장 좋은 방법은 '{best}'({1 - vals[best] / raw:.0%} 감소)"
+                   + (f" mm/일 — 가장 좋은 방법은 '{best}'({gain:.0%} 감소)" if gain >= 0.005 else
+                      " mm/일 — 어느 보정도 오차를 줄이지 못함(다른 달 자료로 추정한 보정값이 맞지 않음)")
                    + (f". 대상월이 적어 계산하지 못한 보정: {', '.join(na)}" if na else "")
                    + ". 채택 여부는 G4에서 결정 (오차분해 ②)")
     loc = res["check"]["location"]

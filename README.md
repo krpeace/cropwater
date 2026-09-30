@@ -151,6 +151,7 @@ python cropwater_fcst.py verify --fcst data/fcst_101_2025 --obs output/eto101_ap
 > 가설·합격 기준·게이트 판정은 [docs/VALIDATION.md](docs/VALIDATION.md), 이론은 [THEORY.md 9장](docs/THEORY.md)에 있습니다.
 >
 > 2026년 ASOS 101 춘천·사과 검증 결과: H2 기준 충족.
+> 2025년(다른 해, 2026년 계수 고정) 독립 검증: H2 기준 충족 — D+1 RMSE 아침 0.94·저녁 0.85 mm/일, 아침 발표는 여유가 작음(최소 개선율 32%).
 > - S3(기온교차 + 강수유무), 생육기 4~9월: D+1 RMSE 아침 0.97·저녁 0.86 mm/일, 지속성 대비 43~50% 개선
 > - S4(하늘상태 반영), 대상일 4/2~9/19: D+1 RMSE 아침 0.93·저녁 0.83 mm/일, 지속성 대비 44~53% 개선. 8월이 크게 좋아졌고 7월(장마)은 여전히 약함
 
