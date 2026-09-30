@@ -401,7 +401,7 @@ def test_s4_cv_excludes_own_month():
             tx = 22 + 6 * rng.random(); tn = tx - 8 - 4 * rng.random()
             cl, ov = 0.5 * rng.random(), 0.5 * rng.random()
             rows.append(dict(target=day, lead_day=k, Tmax=tx, Tmin=tn, rain_flag=float(rng.random() < 0.2),
-                             sky_cloudy=cl, sky_overcast=ov, Ra=38.0, Rso=29.0,
+                             pop_max=float(rng.choice([0.0, 0.3, 0.6])), sky_cloudy=cl, sky_overcast=ov, Ra=38.0, Rso=29.0,
                              Rs_obs=(0.25 + 0.11 * np.sqrt(tx - tn) - 0.1 * ov) * 38.0 + rng.normal()))
     df = pd.DataFrame(rows)
     co, tab = s4_cv(df)
@@ -434,6 +434,15 @@ def test_sky_coef_file_roundtrip(tmp_path):
     c = load_sky_coef("101", p)
     assert sorted(c) == [0, 1, 2, 3, 4] and c[2] == pytest.approx((0.22, 0.1, -0.1, -0.1, -0.2))
     assert load_sky_coef("216", p)[0][0] == pytest.approx(0.3) and load_sky_coef("999", p) == {}
+    # 이전 형식(강수 입력 열 없음 = 강수유무 계수)은 강수확률 기준 S4에 쓰지 않음
+    old = tmp_path / "old.csv"
+    old.write_text("stn,lead_day,a,b,c,d,e\n101,1,0.25,0.11,-0.04,-0.09,-0.23\n", encoding="utf-8")
+    with pytest.raises(ValueError):
+        load_sky_coef("101", old)
+    from cropwater_fcst import load_s4_fixed
+    with pytest.raises(ValueError):
+        load_s4_fixed("101", str(old))
+    assert list(load_s4_fixed("101", str(p)).lead_day) == [0, 1, 2, 3, 4]
 
 
 # ── OpenAPI 응답 CSV (단기예보 조회서비스, 2025년 자료) ─────────────────────
@@ -580,7 +589,8 @@ def test_forecast_table_fixed_s4_coefficients():
     df = forecast_table(st, obs, 37.9, 76.5, dict(a=None), kp, fixed)
     assert s4_is_fixed(df) and set(df.s4_fold) == {S4_FIXED}
     k1 = df[df.lead_day == 1]
-    exp = rs_s4(k1.Tmax, k1.Tmin, k1.rain_flag, k1.sky_cloudy, k1.sky_overcast, k1.Ra, k1.Rso, fixed.iloc[0][["a", "b", "c", "d", "e"]].to_numpy(float))
+    exp = rs_s4(k1.Tmax, k1.Tmin, k1.pop_max, k1.sky_cloudy, k1.sky_overcast, k1.Ra, k1.Rso,        # S4 강수 입력 = 강수확률 하루 최대
+                fixed.iloc[0][["a", "b", "c", "d", "e"]].to_numpy(float))
     assert np.allclose(k1.Rs_S4, exp)
     assert list(df.attrs["s4_table"].fold.unique()) == [S4_FIXED]
     # 보정 탐색: 고정 계수면 중첩 교차검증이 필요 없어 대상월 2개로도 ETo 비율 보정을 구함

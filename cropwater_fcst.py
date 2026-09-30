@@ -45,7 +45,7 @@ import pandas as pd
 from fao56_core import eto_penman_monteith, wind_2m
 from fcst_archive import RAIN_FLAG_MM, SERVICE_RUNS, check_archive, load_archive, service_table
 from obs_daily import add_eto_obs, kc_params, kc_series, load_station_workbook
-from rs_model import S4_NAMES, fit, fit_s4, load_coef, ra_rso, rs_s1, rs_s3, rs_s4, save_coef, save_sky_coef
+from rs_model import S4_NAMES, S4_RAIN_DEFAULT, fit, fit_s4, load_coef, ra_rso, rs_s1, rs_s3, rs_s4, save_coef, save_sky_coef
 
 FCST_ANEM = 10.0            # 단기예보 풍속(WSD) 기준 높이 (m)
 KRS_FAO = 0.16              # FAO-56 식(50) 내륙 기본값
@@ -63,7 +63,8 @@ STATIONS = {"101": ("춘천", "73_134"), "216": ("태백", "95_119"), "119": ("�
 # 관측소 경도(°E) — 하늘상태를 낮 시간 일사 비중으로 가중할 때 태양시 보정에만 씀(0.1° 차이 = 0.4분)
 STATION_LON = {"101": 127.7357, "216": 128.9893, "119": 126.9830, "131": 127.4407, "129": 126.4939,
                "146": 127.1172, "156": 126.8916, "136": 128.7073, "192": 128.0400, "189": 126.5653}
-S4_FEATS = ("Tmax", "Tmin", "rain_flag", "sky_cloudy", "sky_overcast", "Ra", "Rso")
+S4_RAIN = S4_RAIN_DEFAULT   # S4 강수 입력: 강수확률 하루 최대(pop_max, 0~1). #17 결정(2026-09-30). 이전(G3 재검증·#13)은 rain_flag
+S4_FEATS = ("Tmax", "Tmin", S4_RAIN, "sky_cloudy", "sky_overcast", "Ra", "Rso")
 S4_FIXED = "고정"      # 다른 해 운영 계수를 그대로 쓸 때의 계수 묶음 이름(SKY계수 시트 키 '고정|k')
 
 
@@ -119,7 +120,7 @@ def s4_cv(df, exclude=()):
             if tr.sum() < 20:
                 continue
             t = df[tr]
-            c = fit_s4(t.Tmax, t.Tmin, t.rain_flag, t.sky_cloudy, t.sky_overcast, t.Ra, t.Rs_obs)
+            c = fit_s4(t.Tmax, t.Tmin, t[S4_RAIN], t.sky_cloudy, t.sky_overcast, t.Ra, t.Rs_obs)
             co[feat & (fold == f) & (lead == k)] = c
             rows.append(dict(fold=f, lead_day=int(k), n=int(tr.sum()), **dict(zip(S4_NAMES, c))))
     return co, pd.DataFrame(rows, columns=["fold", "lead_day", "n", *S4_NAMES])
@@ -130,8 +131,8 @@ def s4_fit_all(df):
     ok = df[list(S4_FEATS)].notna().all(axis=1) & df["Rs_obs"].notna()
     rows = []
     for k, t in df[ok].groupby("lead_day"):
-        c = fit_s4(t.Tmax, t.Tmin, t.rain_flag, t.sky_cloudy, t.sky_overcast, t.Ra, t.Rs_obs)
-        est = rs_s4(t.Tmax, t.Tmin, t.rain_flag, t.sky_cloudy, t.sky_overcast, t.Ra, t.Rso, c)
+        c = fit_s4(t.Tmax, t.Tmin, t[S4_RAIN], t.sky_cloudy, t.sky_overcast, t.Ra, t.Rs_obs)
+        est = rs_s4(t.Tmax, t.Tmin, t[S4_RAIN], t.sky_cloudy, t.sky_overcast, t.Ra, t.Rso, c)
         rows.append(dict(lead_day=int(k), **dict(zip(S4_NAMES, c)), n=len(t),
                          fit_start=str(t.target.min().date()), fit_end=str(t.target.max().date()),
                          rmse_rs=float(np.sqrt(np.mean((est - t.Rs_obs.values) ** 2)))))
@@ -144,6 +145,9 @@ def load_s4_fixed(stn, path):
     t = t[t["stn"].str.strip() == str(stn)]
     if t.empty:
         raise ValueError(f"{path}에 지점 {stn}의 S4 계수가 없습니다(calib-sky로 먼저 만드세요)")
+    got = set(t["rain_input"].fillna("rain_flag")) if "rain_input" in t else {"rain_flag"}    # 열이 없으면 이전 형식
+    if got != {S4_RAIN}:
+        raise ValueError(f"{path}: S4 계수의 강수 입력이 {sorted(got)}입니다({S4_RAIN} 필요). calib-sky로 다시 만드세요")
     for c in ("n", "fit_start", "fit_end", "note"):
         if c not in t:
             t[c] = ""
@@ -180,7 +184,7 @@ def forecast_table(st, obs, lat, elev, coef, kp, s4_fixed=None):
         df[c] = look(c_obs, df.target)
     df["flag_obs"] = (df["rain_obs"] >= RAIN_FLAG_MM).astype(int)
     methods = ["S3", "S1"]
-    if "sky_cloudy" in df and df["sky_cloudy"].notna().any():
+    if "sky_cloudy" in df and df["sky_cloudy"].notna().any() and S4_RAIN in df and df[S4_RAIN].notna().any():
         if s4_fixed is None:
             co, tab = s4_cv(df)
             df["s4_fold"] = month_folds(df.target).values
@@ -192,7 +196,7 @@ def forecast_table(st, obs, lat, elev, coef, kp, s4_fixed=None):
             df["s4_fold"] = S4_FIXED
         for j, n in enumerate(S4_NAMES):
             df[f"s4_{n}"] = co[:, j]
-        df["Rs_S4"] = rs_s4(df.Tmax, df.Tmin, df.rain_flag, df.sky_cloudy, df.sky_overcast, df.Ra, df.Rso, co)
+        df["Rs_S4"] = rs_s4(df.Tmax, df.Tmin, df[S4_RAIN], df.sky_cloudy, df.sky_overcast, df.Ra, df.Rso, co)
         df["ETo_S4"] = eto_series(df.Tmax, df.Tmin, df.ea, df.u10, df.Rs_S4, df.target, lat, elev)
         df.attrs["s4_table"] = tab
         methods.insert(0, "S4")
@@ -224,7 +228,7 @@ def split_verifiable(df):
     no_obs = df["ETo_obs"].isna()
     no_base = df[["ETo_pers", "ETo_7d"]].isna().any(axis=1)
     reason = np.select([no_in, no_sky, no_obs, no_base],
-                       ["예보 입력 결측", "하늘상태 없음", "대상일 관측 없음", "기준선 관측 없음"], "")
+                       ["예보 입력 결측", "하늘상태·강수확률 없음", "대상일 관측 없음", "기준선 관측 없음"], "")
     d = df.assign(drop_reason=reason)
     keep = d[reason == ""].drop(columns="drop_reason").reset_index(drop=True)
     keep.attrs = dict(df.attrs)
@@ -394,28 +398,36 @@ def input_diagnostics(df):
     return pd.DataFrame(rows)
 
 
-def main_rs(df, lat, elev, coef, tmax=None, tmin=None, flag=None, s4coef=None):
-    """주 방법의 Rs를 (바꾼) 입력으로 다시 계산. S4는 행별 계수(s4_a~e 열 또는 s4coef), S3는 rs_coef 계수"""
+def rain_input(df):
+    """주 방법의 강수 입력 열: S4는 강수확률 하루 최대(S4_RAIN), S3는 강수유무"""
+    return S4_RAIN if main_method(df) == "S4" else "rain_flag"
+
+
+def main_rs(df, lat, elev, coef, tmax=None, tmin=None, rain=None, s4coef=None):
+    """주 방법의 Rs를 (바꾼) 입력으로 다시 계산. S4는 행별 계수(s4_a~e 열 또는 s4coef), S3는 rs_coef 계수.
+       rain: 주 방법의 강수 입력(S4 강수확률 하루 최대, S3 강수유무). 없으면 df의 해당 열"""
     tmax = df.Tmax if tmax is None else tmax
     tmin = df.Tmin if tmin is None else tmin
-    flag = df.rain_flag if flag is None else flag
+    rain = df[rain_input(df)] if rain is None else rain
     if main_method(df) == "S4":
         co = df[[f"s4_{n}" for n in S4_NAMES]].values if s4coef is None else s4coef
-        return rs_s4(tmax, tmin, flag, df.sky_cloudy, df.sky_overcast, df.Ra, df.Rso, co)
-    return rs_estimate(tmax, tmin, flag, df.target, lat, elev, coef, "S3")[0]
+        return rs_s4(tmax, tmin, rain, df.sky_cloudy, df.sky_overcast, df.Ra, df.Rso, co)
+    return rs_estimate(tmax, tmin, rain, df.target, lat, elev, coef, "S3")[0]
 
 
 def error_attribution(df, lat, elev, coef):
     """예보 입력을 하나씩 관측값으로 바꿨을 때의 ETo RMSE (주 방법). 줄어든 만큼이 그 입력 예보오차의 몫.
        '관측 입력 전부'는 Rs 추정만 남은 상태(S3면 H1 조건과 같음. S4는 하늘상태 관측이 없어 예보 그대로)."""
     all_obs = "관측 입력 전부 (Rs만 추정)" if main_method(df) == "S3" else "관측 입력 전부 (Rs만 추정, 하늘상태는 예보)"
+    rc = rain_input(df)       # S4: 강수확률 하루 최대 → '관측'은 비 온 날(≥ 1 mm) 1, 아니면 0 (완벽한 강수확률)
+    rain_name = "강수유무 → 관측" if rc == "rain_flag" else "강수확률 → 관측 (비 온 날 1)"
     variants = {
         "예보 입력 그대로": dict(),
         "기온 → 관측": dict(Tmax="Tmax_obs", Tmin="Tmin_obs"),
         "습도(ea) → 관측": dict(ea="ea_obs"),
         "풍속 → 관측": dict(u10="u10_obs"),
-        "강수유무 → 관측": dict(rain_flag="flag_obs"),
-        all_obs: dict(Tmax="Tmax_obs", Tmin="Tmin_obs", ea="ea_obs", u10="u10_obs", rain_flag="flag_obs"),
+        rain_name: {rc: "flag_obs"},
+        all_obs: {"Tmax": "Tmax_obs", "Tmin": "Tmin_obs", "ea": "ea_obs", "u10": "u10_obs", rc: "flag_obs"},
         "참고: Rs만 관측": dict(Rs="Rs_obs"),
     }
     res = {}
@@ -424,7 +436,7 @@ def error_attribution(df, lat, elev, coef):
         if "Rs" in rep:
             rs = df["Rs_obs"].values
         else:
-            rs = main_rs(df, lat, elev, coef, col("Tmax"), col("Tmin"), col("rain_flag"))
+            rs = main_rs(df, lat, elev, coef, col("Tmax"), col("Tmin"), col(rc))
         res[name] = eto_series(col("Tmax"), col("Tmin"), col("ea"), col("u10"), rs, df.target, lat, elev)
     rows = []
     for (rn, k), idx in df.groupby(["run_name", "lead_day"], sort=False).groups.items():
@@ -464,7 +476,7 @@ def bias_correction_cv(df, lat, elev, coef):
         base_tr = tr.ETo_main
         if main == "S4" and not s4_is_fixed(d):   # 학습 행의 S4 예보를 검증 달 f까지 뺀 계수로 다시 계산(고정 계수면 그대로)
             co_f, _ = s4_cv(d, exclude=(f,))
-            rs_f = rs_s4(tr.Tmax, tr.Tmin, tr.rain_flag, tr.sky_cloudy, tr.sky_overcast, tr.Ra, tr.Rso,
+            rs_f = rs_s4(tr.Tmax, tr.Tmin, tr[S4_RAIN], tr.sky_cloudy, tr.sky_overcast, tr.Ra, tr.Rso,
                          co_f[[pos[i] for i in tr.index]])
             base_tr = pd.Series(eto_series(tr.Tmax, tr.Tmin, tr.ea, tr.u10, rs_f, tr.target, lat, elev), index=tr.index)
         for (rn, k), g in te.groupby(["run_name", "lead_day"]):
@@ -475,7 +487,7 @@ def bias_correction_cv(df, lat, elev, coef):
             ok = base_tr[m].notna() & t.ETo_obs.notna()
             ratio = t.ETo_obs[ok].sum() / base_tr[m][ok].sum()
             tx, tn = g.Tmax - dtx, g.Tmin - dtn
-            rs = main_rs(g, lat, elev, coef, tx, tn, g.rain_flag)
+            rs = main_rs(g, lat, elev, coef, tx, tn)
             idx = [pos[i] for i in g.index]
             cols["B1"][idx] = eto_series(tx, tn, g.ea, g.u10, rs, g.target, lat, elev)
             cols["B2"][idx] = eto_series(tx, tn, g.ea, (g.u10 - du).clip(lower=0.1), rs, g.target, lat, elev)
@@ -681,8 +693,13 @@ def findings(res):
             over = b.assign(ex=b.rain_fcst - b.rain_obs).groupby("month").ex.mean()
             if over.max() >= 0.15:
                 mo = int(over.idxmax()); x = b[b.month == mo]
-                txt += (f". {mo}월은 예보상 비 오는 날이 {x.rain_fcst.mean():.0%}(실제 {x.rain_obs.mean():.0%})로 많아 "
-                        f"강수유무 보정이 Rs를 더 낮춤")
+                if res.get("main") == "S4" and S4_RAIN in df:
+                    pm = df[(df.lead_day == 1) & (df.target.dt.month == mo)][S4_RAIN].mean()
+                    txt += (f". {mo}월은 예보상 비 오는 날이 {x.rain_fcst.mean():.0%}(실제 {x.rain_obs.mean():.0%})로 많고 "
+                            f"강수확률 하루 최대도 평균 {pm:.0%}여서 강수 항이 Rs를 더 낮춤")
+                else:
+                    txt += (f". {mo}월은 예보상 비 오는 날이 {x.rain_fcst.mean():.0%}(실제 {x.rain_obs.mean():.0%})로 많아 "
+                            f"강수유무 보정이 Rs를 더 낮춤")
             out.append(txt + " (월별 시트)")
         else:
             out.append(f"월별(D+1): 모든 달에서 RMSE ≤ {H2_RMSE_D1_MAX:.1f} mm/일 (월별 시트)")
@@ -735,10 +752,10 @@ def findings(res):
         out.append(f"자료 공백: 요소가 빠진 서비스 발표 {sum(g[2] for g in gaps)}회 제외({txt})"
                    + (". 행 제외: " + ", ".join(f"{k} {v}행" for k, v in why.items()) if why else "") + " (방법 시트)")
     dr = res.get("dropped")
-    if dr is not None and len(dr) and (dr.drop_reason == "하늘상태 없음").any():
+    if dr is not None and len(dr) and (dr.drop_reason == "하늘상태·강수확률 없음").any():
         last = df.run.max()
-        out.append(f"기간: 하늘상태 자료가 있는 발표({last:%m/%d %H}시까지)만 판정에 썼습니다 → 대상일 "
-                   f"{df.target.min():%m/%d}~{df.target.max():%m/%d}. 뒤쪽 하늘상태 자료를 받으면 다시 계산합니다")
+        out.append(f"기간: 하늘상태·강수확률 자료가 있는 발표({last:%m/%d %H}시까지)만 판정에 썼습니다 → 대상일 "
+                   f"{df.target.min():%m/%d}~{df.target.max():%m/%d}. 뒤쪽 자료를 받으면 다시 계산합니다")
     months = sorted(df.target.dt.month.unique())
     if not set(range(4, 10)) <= set(months):
         out.append(f"기간: 대상일 {df.target.min():%Y-%m-%d}~{df.target.max():%Y-%m-%d}만 포함한 "
@@ -771,7 +788,8 @@ def main(argv=None):
         if res["main"] != "S4":
             raise SystemExit("[중단] 하늘상태(SKY) 예보가 없어 S4 계수를 맞출 수 없습니다")
         tab = res["s4_all"]
-        save_sky_coef(a.stn, tab, a.sky_coef, note=f"{os.path.basename(a.obs)} 예보 입력 → 관측 Rs, 선행일별")
+        save_sky_coef(a.stn, tab, a.sky_coef, note=f"{os.path.basename(a.obs)} 예보 입력 → 관측 Rs, 선행일별",
+                      rain_input=S4_RAIN)
         print(tab.round(4).to_string(index=False))
         print(f"[저장] {a.sky_coef}")
         return

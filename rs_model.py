@@ -26,7 +26,8 @@ from fao56_core import extra_radiation
 RS_COEF_DEFAULT = "rs_coef.csv"
 RS_SKY_COEF_DEFAULT = "rs_sky_coef.csv"
 _COLS = ["stn", "method", "krs", "a", "b", "c", "fit_start", "fit_end", "n", "rmse_rs", "note"]
-_SKY_COLS = ["stn", "lead_day", "a", "b", "c", "d", "e", "fit_start", "fit_end", "n", "rmse_rs", "note"]
+_SKY_COLS = ["stn", "lead_day", "rain_input", "a", "b", "c", "d", "e", "fit_start", "fit_end", "n", "rmse_rs", "note"]
+S4_RAIN_DEFAULT = "pop_max"      # S4의 강수 입력(계수 c의 변수): 강수확률 하루 최대(0~1). #17 결정(2026-09-30), 이전은 rain_flag
 S4_NAMES = ("a", "b", "c", "d", "e")
 
 
@@ -50,7 +51,8 @@ def rs_s3(tmax, tmin, rain_flag, ra, rso, a, b, c):
 
 
 def s4_design(tmax, tmin, rain_flag, cloudy, overcast):
-    """S4 설명변수 [1, √(Tmax−Tmin), 강수유무, 구름많음 비율, 흐림 비율]"""
+    """S4 설명변수 [1, √(Tmax−Tmin), 강수 입력, 구름많음 비율, 흐림 비율].
+       강수 입력은 강수확률 하루 최대(0~1, 현재) 또는 강수유무(0/1, 이전) — 호출하는 쪽이 정한다"""
     dT = np.maximum(np.asarray(tmax, float) - np.asarray(tmin, float), 0.0)
     return np.column_stack([np.ones(len(dT)), np.sqrt(dT), np.asarray(rain_flag, float),
                             np.asarray(cloudy, float), np.asarray(overcast, float)])
@@ -73,14 +75,15 @@ def fit_s4(tmax, tmin, rain_flag, cloudy, overcast, ra, rs_obs):
     return np.linalg.lstsq(X[ok], y[ok], rcond=None)[0]
 
 
-def save_sky_coef(stn, table, path=RS_SKY_COEF_DEFAULT, note=""):
-    """선행일별 S4 계수표(열 lead_day, a~e, n, fit_start, fit_end, rmse_rs)를 rs_sky_coef.csv에 기록(같은 지점 행은 교체)"""
+def save_sky_coef(stn, table, path=RS_SKY_COEF_DEFAULT, note="", rain_input=S4_RAIN_DEFAULT):
+    """선행일별 S4 계수표(열 lead_day, a~e, n, fit_start, fit_end, rmse_rs)를 rs_sky_coef.csv에 기록(같은 지점 행은 교체).
+       rain_input: 계수 c가 곱해지는 강수 입력 열 이름(pop_max 또는 rain_flag)"""
     rows = []
     if os.path.exists(path):
         with open(path, encoding="utf-8-sig") as f:
             rows = [r for r in csv.DictReader(f) if str(r.get("stn")) != str(stn)]
     for r in table.to_dict("records"):
-        rows.append(dict(stn=stn, lead_day=int(r["lead_day"]), **{k: round(float(r[k]), 4) for k in S4_NAMES},
+        rows.append(dict(stn=stn, lead_day=int(r["lead_day"]), rain_input=rain_input, **{k: round(float(r[k]), 4) for k in S4_NAMES},
                          fit_start=r.get("fit_start", ""), fit_end=r.get("fit_end", ""), n=int(r.get("n", 0)),
                          rmse_rs=round(float(r.get("rmse_rs", float("nan"))), 3), note=note))
     with open(path, "w", newline="", encoding="utf-8-sig") as f:
@@ -90,13 +93,18 @@ def save_sky_coef(stn, table, path=RS_SKY_COEF_DEFAULT, note=""):
             w.writerow({k: r.get(k, "") for k in _SKY_COLS})
 
 
-def load_sky_coef(stn, path=RS_SKY_COEF_DEFAULT):
-    """지점의 선행일별 S4 계수 {lead_day: (a, b, c, d, e)}. 없으면 빈 dict"""
+def load_sky_coef(stn, path=RS_SKY_COEF_DEFAULT, rain_input=S4_RAIN_DEFAULT):
+    """지점의 선행일별 S4 계수 {lead_day: (a, b, c, d, e)}. 없으면 빈 dict.
+       파일의 강수 입력(rain_input 열, 없으면 이전 형식 = rain_flag)이 요구와 다르면 ValueError"""
     if not os.path.exists(path):
         return {}
     with open(path, encoding="utf-8-sig") as f:
-        return {int(r["lead_day"]): tuple(float(r[k]) for k in S4_NAMES)
-                for r in csv.DictReader(f) if str(r.get("stn")) == str(stn)}
+        rows = [r for r in csv.DictReader(f) if str(r.get("stn")) == str(stn)]
+    for r in rows:
+        got = r.get("rain_input") or "rain_flag"
+        if got != rain_input:
+            raise ValueError(f"{path}: S4 계수의 강수 입력이 {got}입니다({rain_input} 필요). calib-sky로 다시 만드세요")
+    return {int(r["lead_day"]): tuple(float(r[k]) for k in S4_NAMES) for r in rows}
 
 
 def fit(obs, lat, elev, months=range(4, 10)):
