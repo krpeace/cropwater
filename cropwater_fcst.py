@@ -731,7 +731,7 @@ def findings(res):
                    + (f" mm/일 — 가장 좋은 방법은 '{best}'({gain:.0%} 감소)" if gain >= 0.005 else
                       " mm/일 — 어느 보정도 오차를 줄이지 못함(다른 달 자료로 추정한 보정값이 맞지 않음)")
                    + (f". 대상월이 적어 계산하지 못한 보정: {', '.join(na)}" if na else "")
-                   + ". 채택 여부는 G4에서 결정 (오차분해 ②)")
+                   + ". 편향 보정은 쓰지 않음 — 한 해에서 구한 보정값이 다른 해로 옮겨 가지 않음(VALIDATION #10) (오차분해 ②)")
     loc = res["check"]["location"]
     if res.get("grid_cmp"):
         gc, loc2 = res["grid_cmp"], res["compare"]["check"]["location"]

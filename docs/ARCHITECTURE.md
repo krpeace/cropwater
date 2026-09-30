@@ -386,14 +386,15 @@ FAO-56 식(85)의 `I` 항에 농가가 준 관수량을 넣습니다. 비어 있
 python cropwater_fcst.py calib --obs output/eto101_apple_20250101_20251231.xlsx --stn 101
 
 # 2) H2 검증 엑셀 — 과거 단기예보 CSV 폴더 + 검증 연도 01-Cycle 워크북
-python cropwater_fcst.py verify --fcst data/fcst_101_73134 --obs output/eto101_apple_20260101_20260928.xlsx --stn 101
+#    (2026년 자료는 OpenAPI로 받은 요소별 KST CSV — 파일에 격자 정보가 없어 --grid로 지정. #14부터 운영·검증 모두 OpenAPI 자료 기준)
+python cropwater_fcst.py verify --fcst data/fcst_101_2026 --grid 73_134 --obs output/eto101_apple_20260101_20260928.xlsx --stn 101
 #    → output/fcst_verify(101)_<격자>_<첫 대상일>_<끝 대상일>.xlsx
 
 # (선택) 다른 격자와 비교 — 같은 관측·계수·Kc로 계산해 '격자비교' 시트 추가
 python cropwater_fcst.py verify --fcst data/fcst_101_73134 --compare data/fcst_101_73135 --obs ... --stn 101
 
 # 3) 운영용 S4 계수 — 하늘상태를 포함한 한 생육기의 예보·관측으로 선행일별 적합 (rs_sky_coef.csv)
-python cropwater_fcst.py calib-sky --fcst data/fcst_101_73134 --obs output/eto101_apple_20260101_20260928.xlsx --stn 101
+python cropwater_fcst.py calib-sky --fcst data/fcst_101_2026 --grid 73_134 --obs output/eto101_apple_20260101_20260928.xlsx --stn 101
 
 # 4) 다른 해 독립 검증 (VALIDATION #13) — S4는 다른 해 운영 계수 고정, S3 비교 계수도 다른 해 관측으로
 python cropwater_fcst.py calib --obs output/eto101_apple_20260101_20260928.xlsx --stn 101 --coef rs_coef_2026.csv
@@ -401,16 +402,16 @@ python cropwater_fcst.py verify --fcst data/fcst_101_2025 --obs output/eto101_ap
        --grid 73_134 --coef rs_coef_2026.csv --s4-coef rs_sky_coef.csv
 
 # 5) (G4) 예보 ETo 오차표 — 해마다 한 번. 검증과 같은 계수 조건으로 (fcst_error_table.csv에 지점·해 행을 바꿔 넣음)
-python cropwater_fcst.py errtable --fcst data/fcst_101_73134 --obs output/eto101_apple_20260101_20260928.xlsx --stn 101
+python cropwater_fcst.py errtable --fcst data/fcst_101_2026 --grid 73_134 --obs output/eto101_apple_20260101_20260928.xlsx --stn 101
 python cropwater_fcst.py errtable --fcst data/fcst_101_2025 --obs output/eto101_apple_20250101_20251231.xlsx --stn 101 \
        --grid 73_134 --coef rs_coef_2026.csv --s4-coef rs_sky_coef.csv
 
 # 6) (G4) 예보 물수지 검증 엑셀 — 범위의 오차는 검증 연도를 뺀 다른 해 오차표로 채점
-python cropwater_fcst.py wbverify --fcst data/fcst_101_73134 --obs output/eto101_apple_20260101_20260928.xlsx --stn 101
+python cropwater_fcst.py wbverify --fcst data/fcst_101_2026 --grid 73_134 --obs output/eto101_apple_20260101_20260928.xlsx --stn 101
 #    → output/fcst_wbverify(101)_<격자>_<첫 채점 대상일>_<끝 채점 대상일>.xlsx   (--auto-irrigate: 관수 규칙 시나리오, 파일명 _irrig)
 
 # 7) (G4) 서비스 엑셀 — 한 발표의 관수 전망. S4는 운영 계수(rs_sky_coef.csv, 기본값), 오차표는 여러 해 합침
-python cropwater_fcst.py service --fcst data/fcst_101_73134 --obs output/eto101_apple_20260101_20260928.xlsx --stn 101 \
+python cropwater_fcst.py service --fcst data/fcst_101_2026 --grid 73_134 --obs output/eto101_apple_20260101_20260928.xlsx --stn 101 \
        --run "2026-05-15 02" --irrig 관수기록.csv
 #    → output/fcst_service(101)_20260515_02.xlsx   (--run이 없으면 자료의 가장 최근 서비스 발표)
 ```
@@ -557,6 +558,7 @@ rs_coef.csv ─────→ rs_model.load_coef()   ──┘   예보 ETo(S3�
   - 숫자로만 온 값은 그대로: 17~23시 발표의 글피(D+3) 1시간 칸은 소수(0.1~4.5 등, "0"은 강수없음), 연장기간은 코드 0~3
   - **포털 자료와의 차이 (#16에서 확인):** 같은 발표(2026-05-01~05, 40회)를 두 자료로 대조했습니다. 포털은 1 mm 미만을 0으로, 1 mm 이상을 정수로 반올림해 기록합니다('1mm 미만' → 0, 4.8 → 5). 다른 요소는 100% 같습니다([VALIDATION.md](VALIDATION.md) #16).
     - 그래서 포털 자료로 맞춘 계수를 OpenAPI 입력에 쓰면 강수유무 판정이 달라질 수 있습니다. S4의 강수 입력을 강수확률로 바꾼 이유 중 하나입니다(#17). 강수확률은 두 자료가 같습니다.
+    - **2026년 4~9월 전체 대조(#14):** 8/26 11시 ~ 8/27 08시 발표 8회에서 포털의 1시간 기온·강수확률·하늘상태가 OpenAPI와 달랐습니다(포털 하늘상태에 코드표에 없는 0이 있던 구간, 포털 쪽 문제로 봄). 나머지는 강수 표기 외 같습니다. 운영 계수·오차표·검증은 모두 OpenAPI 자료로 만듭니다.
     - OpenAPI 자료의 '1mm 미만'은 0.5 mm로 둡니다. 2025년 자료에서 0과 비교해 Rs 오차가 같거나 작았고, 물수지(G4)의 강수량으로도 더 자연스럽습니다.
 - **마지막 날(연장기간) 코드값:**
   - 풍속 WSD: 1 → 같은 발표의 직전 정량일 평균 풍속(최대 3.9 m/s), 2 → 6.5, 3 → 11 m/s
