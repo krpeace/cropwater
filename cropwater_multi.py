@@ -36,7 +36,7 @@ from fao56_core import (svp, slope_svp as slope, extra_radiation as extra_rad,
                          daylight_hours as daylight, wind_2m as wind2m,
                          kp_class_a as kp_pan, eto_penman_monteith as eto_pm,
                          num, fetch_station_table, fetch_asos, load_apikeys,
-                         safe_save, load_station_backup, save_station_backup)
+                         safe_save, load_station_backup, save_station_backup, wb_step)
 
 # ── 주요 지점 예시 ──
 MAJOR=[(90,"속초"),(101,"춘천"),(93,"북춘천"),(105,"강릉"),(114,"원주"),(216,"태백"),(212,"홍천"),
@@ -81,8 +81,9 @@ def compute_station(rows, lat, elev, anem, fetch=100.0):
 
 
 def compute_water_balance(recs, taw, raw):
-    """FAO-56 식(85) 일별 근권 물수지 추적.
+    """FAO-56 식(85) 일별 근권 물수지 추적 (fao56_core.wb_step).
        기준작물(Kc=1) · 무관수(자연강우만) 가정. RO(지표유출)=0, CR(모관상승)=0.
+       Ks는 전날 끝 고갈량 Dr,i-1로 정한다(FAO-56 원식, VALIDATION #15).
        recs 리스트에 DP, Peff, Dr, Ks, irr, In 필드를 추가하여 반환.
     """
     Dr = 0.0  # 초기 고갈량 = 0 (포장용수량 출발)
@@ -90,20 +91,10 @@ def compute_water_balance(recs, taw, raw):
         P   = rec.get("rain") or 0
         ETo = rec.get("PM")   # None이면 결측
 
-        # Ks [식84]: 스트레스 계수 — 그날 비가 먼저 들어간 뒤의 고갈량으로 판단
-        Dr_after = max(Dr - P, 0)
-        if ETo is not None:
-            Ks = 1.0 if Dr_after <= raw else max((taw - Dr_after) / (taw - raw), 0.0)
-            ETc_adj = Ks * ETo   # Kc=1(기준작물)
-        else:
+        # Ks[식84]·DP[식88 원식]·Dr[식85·86] — 결측일은 ETc=0으로 두고 Ks는 비움
+        Ks, ETc_adj, DP, Dr_end = wb_step(Dr, P, ETo if ETo is not None else 0.0, taw, raw)
+        if ETo is None:
             Ks = None
-            ETc_adj = 0.0        # 결측일은 보수적으로 ETc=0 처리
-
-        # DP [식88, FAO-56 원식]: DP = P − ETc,adj − Dr,i-1 ≥ 0 (그날 증발산으로 쓰고 남은 비만 근권 아래로)
-        DP = max(P - ETc_adj - Dr, 0)
-
-        # Dr,i [식85·86]: Dr,i = Dr,i-1 − P + ETc,adj + DP, 0 ≤ Dr ≤ TAW
-        Dr_end = min(max(Dr - P + ETc_adj + DP, 0.0), taw)
         irr    = (Dr_end >= raw)
 
         rec["DP"]   = round(DP,      2)
@@ -604,7 +595,7 @@ def main():
         (f"TAW [식82]",f"총유효수분 = 1000×(FC−WP)×Zr. 기본값 {TAW}mm (Zr={a.zr}m, FC={a.fc}, WP={a.wp})."),
         (f"RAW [식83]",f"쉽게이용가능수분 = p×TAW. 기본값 {RAW}mm (p={a.pdep}). Dr≥RAW이면 관수필요."),
         ("DP [식88]","심층침투(FAO-56 원식) = max(P − ETc_adj − Dr,i-1, 0). 그날 증발산으로 쓰고 근권을 채우고도 남는 비만 근권 아래로 손실."),
-        ("Ks [식84]","수분스트레스계수. 그날 비가 들어간 뒤의 고갈량 max(Dr,i-1 − P, 0)이 RAW 이하이면 1.0, 초과 시 (TAW−Dr)/(TAW−RAW)."),
+        ("Ks [식84]","수분스트레스계수. 전날 끝 고갈량 Dr,i-1이 RAW 이하이면 1.0, 초과 시 (TAW−Dr,i-1)/(TAW−RAW) (FAO-56 원식)."),
         ("Dr [식85]","일별 근권 고갈량. Dr,i = Dr,i-1 − P + ETc_adj(=Ks×ETo) + DP. 0 ≤ Dr ≤ TAW. 큰 비가 오면 Dr,i = 0(포장용수량)."),
         ("관수필요","Dr ≥ RAW이면 ●. Dr 미리셋(무관수 가정이므로 관수 후 초기화 없음)."),
         ("필요 순관수량 In","net irrigation depth. 관수필요 시점 Dr 값. 이론적 필요량, 실측값 아님."),

@@ -168,7 +168,7 @@ def forecast_table(st, obs, lat, elev, coef, kp, s4_fixed=None):
     df = st.copy()
     df["target"] = pd.to_datetime(df["target"])
     df["run_date"] = df["run"].dt.normalize()
-    for c in ("rain_flag", "sky_cloudy", "sky_overcast", "pop", "pop_max"):
+    for c in ("rain_flag", "sky_cloudy", "sky_overcast", "pop", "pop_max", "rain_exp"):
         if c in df:
             df[c] = pd.to_numeric(df[c])
     rs3, ra, rso = rs_estimate(df.Tmax, df.Tmin, df.rain_flag, df.target, lat, elev, coef, "S3")
@@ -781,7 +781,29 @@ def main(argv=None):
     k.add_argument("--fcst", nargs="+", required=True); k.add_argument("--obs", required=True)
     k.add_argument("--stn", required=True); k.add_argument("--coef", default="rs_coef.csv")
     k.add_argument("--sky-coef", default="rs_sky_coef.csv")
+    # ── G4: 예보 물수지 ──
+    def _common(q, s4_default=None):
+        q.add_argument("--fcst", nargs="+", required=True); q.add_argument("--obs", required=True)
+        q.add_argument("--stn", required=True); q.add_argument("--coef", default="rs_coef.csv")
+        q.add_argument("--s4-coef", default=s4_default, help="S4 계수 파일(주면 고정 적용)")
+        q.add_argument("--grid", default=None, help="파일에 격자 정보가 없을 때 격자 nx_ny")
+        q.add_argument("--err", default="fcst_error_table.csv", help="예보 ETo 오차표(월·발표·선행일별)")
+    e = sub.add_parser("errtable", help="과거 예보 + 관측으로 예보 ETo 오차표 행(지점·해)을 만들어 fcst_error_table.csv에 기록")
+    _common(e)
+    w = sub.add_parser("wbverify", help="예보 물수지(관수 필요 예상일) 검증 엑셀 — G4")
+    _common(w)
+    w.add_argument("--irrig", default=None, help="관수 기록 CSV(날짜, 관수량_mm) — 관측 물수지에 반영")
+    w.add_argument("--auto-irrigate", action="store_true", help="관수 규칙 시나리오: 전날 끝 Dr ≥ RAW면 Dr만큼 관수")
+    w.add_argument("--out", default=None)
+    s = sub.add_parser("service", help="한 서비스 발표(아침 02시·저녁 17시)의 관수 전망 엑셀")
+    _common(s, s4_default="rs_sky_coef.csv")
+    s.add_argument("--run", default=None, help="발표시각 'YYYY-MM-DD HH' (없으면 자료의 가장 최근 서비스 발표)")
+    s.add_argument("--irrig", default=None, help="관수 기록 CSV(날짜, 관수량_mm)")
+    s.add_argument("--out", default=None)
     a = ap.parse_args(argv)
+
+    if a.cmd in ("errtable", "wbverify", "service"):
+        return _main_wb(a)
 
     if a.cmd == "calib-sky":
         res = run_verify(a.fcst, a.obs, a.stn, a.coef, analysis=False)
@@ -842,6 +864,54 @@ def main(argv=None):
     from fcst_report import build_verify_workbook
     saved = build_verify_workbook(res, out)
     print(f"[완료] {saved}")
+
+
+def _main_wb(a):
+    """G4 하위 명령: errtable / wbverify / service (fcst_wb.py, fcst_wb_report.py)"""
+    import fcst_wb as W
+    from fao56_core import load_irrigation_log
+    irrig = load_irrigation_log(a.irrig) if getattr(a, "irrig", None) else None
+    if a.cmd == "errtable":
+        p = W.prepare(a.fcst, a.obs, a.stn, a.coef, a.s4_coef, a.grid)
+        year = int(pd.to_datetime(p["ft"].target).min().year)
+        rows = W.eto_error_rows(p["ft"], a.stn, year)
+        path = coef_file(a.err) if os.path.exists(coef_file(a.err)) else a.err
+        W.save_error_table(rows, path)
+        d = rows[(rows.kind == "day") & (rows.month == 0)]
+        print(f"[오차표] 지점 {a.stn} {year}년 {len(rows)}행 → {path}")
+        print(d[["run_name", "lead_day", "n", "rmse", "mbe", "obs_mean"]].round(3).to_string(index=False))
+        return
+    if a.cmd == "wbverify":
+        res = W.run_wbverify(a.fcst, a.obs, a.stn, a.coef, a.s4_coef, a.grid, a.err, irrig=irrig, auto_irrigate=a.auto_irrigate)
+        if not len(res["err"]):
+            print(f"[경고] {a.err}에 검증 연도({res['year']})를 뺀 다른 해 오차가 없어 범위에 기본 상대 오차 {W.ERR_DEFAULT_REL:.0%}를 씀")
+        soil = res["soil"]
+        print(f"[물수지] TAW {soil['taw']:.0f} mm, RAW {soil['raw']:.0f} mm, 시나리오 {'관수 규칙' if a.auto_irrigate else '무관수'}"
+              + (f", 관수 기록 {len(irrig)}일" if irrig else ""))
+        print(res["lead"][["run_name", "order", "lead_day", "n", "RMSE_Dr_center", "MBE_Dr_center", "RMSE_Dr_obs",
+                           "RMSE_Dr_pers", "skill_Dr_center"]].round(2).to_string(index=False))
+        print(res["fe3_sum"].to_string(index=False))
+        for ln in res["findings"]:
+            print(ln)
+        grid = "-".join(res["check"]["location"]) or "grid"
+        t = pd.to_datetime(res["runs"][res["runs"].ok].target)
+        tag = "_irrig" if a.auto_irrigate else ""
+        out = a.out or f"output/fcst_wbverify({a.stn})_{grid}_{t.min():%Y%m%d}_{t.max():%Y%m%d}{tag}.xlsx"
+        from fcst_wb_report import build_wbverify_workbook
+        print(f"[완료] {build_wbverify_workbook(res, out)}")
+        return
+    sv = W.service_prepare(a.fcst, a.obs, a.stn, a.run, a.coef, a.s4_coef, a.grid, a.err, irrig=irrig)
+    ol = sv["outlook"]
+    raw = sv["soil"]["raw"]
+    lab = lambda k: ("지금 필요" if k == 0 else (f"D+{int(ol['days'].lead_day.iloc[k - 1])} ({ol['days'].target.iloc[k - 1]:%m/%d})"
+                                              + (" 참고" if k > W.MAIN_DAYS else "")) if k else "기간 안 없음")
+    print(f"[발표] {ol['run_name']} {ol['run']:%Y-%m-%d %H시}, 관측 마지막 날 {sv['obs_last']:%Y-%m-%d}, 출발 Dr {ol['start']:.1f} mm (RAW {raw:.0f})")
+    print(f"[3일 ETc] {ol['cum3'][0]:.1f} ± {ol['cum3'][1]:.1f} mm, 관수 필요 예상일 {lab(ol['need']['center'])} "
+          f"(빠르면 {lab(ol['need']['early'])}, 늦으면 {lab(ol['need']['late'])})")
+    out = a.out or f"output/fcst_service({a.stn})_{ol['run']:%Y%m%d_%H}.xlsx"
+    from fcst_wb_report import build_service_workbook
+    print(f"[완료] {build_service_workbook(sv, out)}")
+
 
 
 if __name__ == "__main__":

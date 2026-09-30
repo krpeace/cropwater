@@ -36,11 +36,13 @@ cropwater/
 │     └── build_calendar_sheet()  → 히트맵 + 차트
 │
 └── (02-Cycle) 단기예보 ETo·ETc 예측 — 7장
-      ├── cropwater_fcst.py  ← CLI: calib(Rs 계수) / verify(H2 검증 엑셀)
-      ├── fcst_archive.py    ← 과거 단기예보 CSV 파싱 → 발표별 일 입력
+      ├── cropwater_fcst.py  ← CLI: calib·calib-sky(Rs 계수) / verify(H2 검증 엑셀) / errtable·wbverify·service(G4)
+      ├── fcst_archive.py    ← 과거 단기예보 CSV 파싱 → 발표별 일 입력(기대 강수 포함)
       ├── rs_model.py        ← Rs 추정(S3 식50 + 강수유무, S4 + 강수확률·하늘상태), 계수 파일 2계층
       ├── obs_daily.py       ← 01-Cycle 워크북 → 관측 ETo·Kc
-      └── fcst_report.py     ← 검증 엑셀(10시트, 라이브 수식)
+      ├── fcst_report.py     ← H2 검증 엑셀(라이브 수식)
+      ├── fcst_wb.py         ← (G4) 관측·예보 물수지, 관수 필요 예상일·범위, 오차표, 서비스 전망
+      └── fcst_wb_report.py  ← (G4) 예보 물수지 검증 엑셀 / 서비스(관수 전망) 엑셀
 ```
 
 **의존 관계** — 실행 파일은 서로 독립적이며 `fao56_core`를 공유합니다. 02-Cycle 모듈은 01-Cycle 출력 워크북(관측 기준값)을 입력으로 씁니다.
@@ -50,7 +52,8 @@ cropwater_station ──┐
                     ├──→ fao56_core ──→ requests, openpyxl
 cropwater_multi   ──┘        ▲
                              │
-cropwater_fcst ──→ fcst_archive, rs_model, obs_daily, fcst_report ──→ pandas, numpy, openpyxl
+cropwater_fcst ──→ fcst_archive, rs_model, obs_daily, fcst_report, fcst_wb, fcst_wb_report ──→ pandas, numpy, openpyxl
+                                                                  (fcst_wb → fao56_core.wb_step)
 ```
 
 ---
@@ -117,6 +120,7 @@ safe_save() → Excel 파일
 | `kc_climate_adjust(kc_tab, u2, rhmin, h)` | 표값 Kc·기상값 | Kc_adj | 식(62·65) |
 | `stage_of_date(day_ordinal, start_ordinal, L_ini, L_dev, L_mid, L_late)` | ordinal, 생육일수 | 생육단계명 | Table 11 |
 | `kc_of_date(day_ordinal, start_ordinal, L_ini, ..., kc_ini, kc_mid, kc_end)` | ordinal, 생육일수, Kc값 | Kc | 그림 25 |
+| `wb_step(dr_prev, P, etc, taw, raw, irr_net=0)` | 전날 끝 Dr, 강수, ETc, TAW, RAW, 순관수량 | (Ks, ETc_adj, DP, Dr) | 식84·85·86·88 (Ks는 Dr,i-1) |
 
 **사용 예시:**
 ```python
@@ -182,6 +186,7 @@ kc = kc_of_date(
 | :--- | :--- |
 | `num(v)` | 문자열·None → float 안전 변환 |
 | `safe_save(wb, path)` | 파일명 충돌 시 자동 번호 부여 저장 |
+| `load_irrigation_log(path)` | 관수 기록 CSV(머리행 날짜·관수량_mm[·메모], UTF-8/CP949) → `{date: 공급 관수량 mm}`. 같은 날은 합침, 음수·잘못된 날짜는 오류 |
 
 ---
 
@@ -210,6 +215,7 @@ p = {
     'rh_mid': None,             # 중기 평균 최저 RH
     'u2_end': None,             # 후기 평균 u2
     'rh_end': None,             # 후기 평균 최저 RH
+    'irrig': {},                # 관수 기록 {date: 공급 mm} (--irrig) → 물수지 I열
 }
 ```
 
@@ -231,11 +237,11 @@ p = {
 G2 = 설정!DR0          ← 초기 고갈량 (첫 행)
 G3 = L2                ← 전일 Dr,i (이후 행)
 
-H  = MAX(F-K-G, 0)     [식88] DP = P − ETc_adj − Dr,i-1 ≥ 0 (FAO-56 원식, 2026-09-29)
-I  = MAX(G-F, 0)       강수 후 고갈량 (Ks 판단용)
-J  = IF(I<=RAW, 1, (TAW-I)/(TAW-RAW))   [식84] Ks
+H  = MAX(F+I*Ea-K-G, 0)   [식88] DP = P + I·Ea − ETc_adj − Dr,i-1 ≥ 0 (FAO-56 원식, 2026-09-29)
+I  = 관수량 (값, 노란 칸)   공급량 mm. --irrig 관수 기록으로 채우거나 직접 입력(없으면 0 = 무관수)
+J  = IF(G<=RAW, 1, (TAW-G)/(TAW-RAW))   [식84] Ks — 전날 끝 고갈량 Dr,i-1로 판단(FAO-56 원식, #15, 2026-09-30)
 K  = J*E               ETc_adj = Ks × ETc
-L  = MIN(MAX(G-F+K+H, 0), TAW)   [식85·86] Dr,i = Dr,i-1 − P + ETc_adj + DP
+L  = MIN(MAX(G-F-I*Ea+K+H, 0), TAW)   [식85·86] Dr,i = Dr,i-1 − P − I·Ea + ETc_adj + DP
 M  = IF(L>=RAW,"●","") 관수필요 판정
 N  = IF(M="●",L,0)     필요 순관수량 In
 O  = IF(N>0,N/Ea,0)    필요 총관수량 Ig
@@ -257,24 +263,19 @@ ASOS 원자료 → ETo_PM·ETo_pan 계산.
 ### ◆ compute_water_balance(recs, taw, raw)
 
 FAO-56 식(85) 일별 Dr 추적. 기준작물(Kc=1) · 무관수 가정.
-`recs`에 `{DP, Peff, Dr, Ks, irr, In}` 필드를 추가하여 반환합니다.
+`recs`에 `{DP, Peff, Dr, Ks, irr, In}` 필드를 추가하여 반환합니다. 한 걸음은 `fao56_core.wb_step`입니다.
 
 ```python
-Dr = 0.0
-for rec in recs:
-    P        = rec["rain"]
-    ETo      = rec["PM"]
-    Dr_after = max(Dr - P, 0)                       # Ks 판단용: 비가 먼저 들어간 뒤의 고갈량
-    Ks       = 1.0 if Dr_after <= raw \
-               else (taw - Dr_after) / (taw - raw)
-    ETc_adj  = Ks * ETo
-    DP       = max(P - ETc_adj - Dr, 0)             # [식88] FAO-56 원식 (2026-09-29)
-    Dr       = min(max(Dr - P + ETc_adj + DP, 0), taw)   # [식85·86]
-    rec["Dr"] = Dr
+def wb_step(dr_prev, P, etc, taw, raw, irr_net=0.0):          # fao56_core
+    ks      = 1.0 if dr_prev <= raw else max((taw - dr_prev) / (taw - raw), 0.0)   # [식84] 전날 끝 Dr
+    etc_adj = ks * etc
+    dp      = max(P + irr_net - etc_adj - dr_prev, 0.0)        # [식88] FAO-56 원식
+    dr      = min(max(dr_prev - P - irr_net + etc_adj + dp, 0.0), taw)   # [식85·86]
+    return ks, etc_adj, dp, dr
 ```
 
 - 식(88)은 2026-09-29에 FAO-56 원식으로 바꿨습니다. 이전 간이식 `max(P − Dr, 0)`은 당일 ETc를 빼지 않아, 큰 비가 온 날 DP를 ETc만큼 크게 잡고 그날 끝 고갈량을 0이 아니라 ETc로 남겼습니다.
-- Ks는 그날 비가 들어간 뒤의 고갈량으로 판단합니다. FAO-56 예시는 전날 끝 고갈량 Dr,i-1을 씁니다(비 온 날에만 차이). 판단 시점의 확정은 G4 점검 항목입니다.
+- Ks는 전날 끝 고갈량 Dr,i-1로 판단합니다(FAO-56 원식, #15, 2026-09-30). 이전에는 그날 비가 먼저 들어간 뒤의 고갈량을 썼습니다(비 온 날에만 차이, 2026년 춘천·사과 관수 필요일 43 → 41일).
 
 ### ◆ aggregate_monthly(recs)
 
@@ -337,15 +338,15 @@ my_crop,내_작물명,My Crop,기타,99,0,0.40,1.10,0.85,,,,,25,35,40,20,0.5,0.5
 | 식양토 | 0.30 | 0.15 | 150 |
 | 식토 | 0.36 | 0.20 | 160 |
 
-### ◇ 실측 관수량 연동 (다음 버전 예정)
+### ◆ 관수 기록 연동 (2026-09-30 구현)
 
-현재 물수지는 무관수(자연강우만) 가정입니다. FAO-56 식(85)의 `I` 항에 실측 관수량을 입력하면 Dr이 실측 기반으로 계산됩니다. 데이터 소스는 T21 센서 로그 또는 FarmOS 플랫폼 예정.
+FAO-56 식(85)의 `I` 항에 농가가 준 관수량을 넣습니다. 비어 있으면 지금까지처럼 무관수입니다.
 
-```python
-# 예정 인터페이스
-Dr_end = min(Dr_after - I_net + ETc_adj, taw)
-# I_net: 해당 일 실측 순관수량 (mm)
-```
+- **입력:** 관수 기록 CSV — 머리행 `날짜,관수량_mm[,메모]`(영문 `date,amount_mm`도 됨). 날짜는 `YYYY-MM-DD`·`YYYYMMDD`·`YYYY.MM.DD`·`YYYY/MM/DD`. 관수량은 **공급량(mm)**, 10a(1,000 m²)당 1톤 = 1 mm. 같은 날이 여러 줄이면 합칩니다(`fao56_core.load_irrigation_log`).
+- **물수지:** 순관수량 I = 공급량 × 관수효율 Ea. `wb_step(dr_prev, P, etc, taw, raw, irr_net)`
+- **01-Cycle 워크북:** `cropwater_station.py --irrig 관수기록.csv` → 물수지 시트 I열(노란 칸). 엑셀에서 직접 고쳐도 다시 계산됩니다.
+- **예보 물수지(G4):** 관측 물수지(출발 고갈량)에 반영됩니다. `cropwater_fcst.py service --irrig …`, 서비스 엑셀의 '관측 물수지' 시트 노란 칸.
+- 데이터 소스는 나중에 T21 센서 로그 또는 FarmOS 플랫폼의 관수 제어 이력으로 바꿀 수 있습니다(같은 CSV 형식으로 내보내면 됨).
 
 ### ◇ 단기예보 ETo·ETc 예측 (02-Cycle 진행 중)
 
@@ -365,7 +366,7 @@ Dr_end = min(Dr_after - I_net + ETc_adj, taw)
 
 **입력 대응 (정정)** — TMN/TMX/REH/WSD만으로는 PM을 계산할 수 없습니다. 단기예보에는 **일사량(Rs)이 없으므로** 추정합니다. 하늘상태(SKY)와 강수확률(POP)이 있으면 S4(식50형 + 강수확률 하루 최대 + 구름 비율, 선행일별 계수), 없으면 S3(식50 + 강수유무)입니다. S4의 강수 입력은 #17(2026-09-30)에서 강수유무 → 강수확률 하루 최대로 바꿨습니다. 기압은 고도 기반(식7)으로 대체합니다.
 
-**모듈 (G1~G3 구현, 2026-09-29 SKY 재검증까지)**
+**모듈 (G1~G4 구현, 2026-09-30)**
 
 | 모듈 | 역할 | 단계 | 상태 |
 | :--- | :--- | :---: | :---: |
@@ -374,7 +375,8 @@ Dr_end = min(Dr_after - I_net + ETc_adj, taw)
 | `obs_daily.py` | 01-Cycle 출력 워크북 → 관측 일자료, 관측 ETo(01-Cycle 규칙), Kc(설정 시트 값) | 2 | 구현 |
 | `cropwater_fcst.py` | CLI(`calib`, `calib-sky`, `verify`). 예보 ETo·ETc(주 방법 S4/S3, 비교 S1), S4 월 단위 교차검증 계수(`s4_cv`) 또는 다른 해 계수 고정(`--s4-coef`, `load_s4_fixed`), 기준선, 선행시간별 지표·H2 판정, 방법 비교, 월별 지표, 판정 불확실성(블록 부트스트랩), 입력 진단, 오차 분해, 보정 탐색 | 3 | 구현 |
 | `fcst_report.py` | H2 검증 엑셀 (라이브 수식). 일별비교 열 배치는 `daily_layout()`이 정하고 다른 시트는 열 키로 참조. 하늘상태가 있으면 SKY계수 시트·S4 열·방법 비교 표 추가 | 3 | 구현 |
-| (물수지 전망) | 관측 Dr + 예보 ETc − 예보 유효강수 → 관수 필요 예상일, 서비스용 엑셀 보고서 | 4 | 예정 |
+| `fcst_wb.py` | (G4) 관측 물수지(`observed_wb`: 관수 기록·관수 규칙 시나리오·결측일은 그날 아침 D+0 예보로 채움), 발표별 예보 물수지(`forecast_runs`: 아침 출발 = 관측 Dr(D−1), 저녁 = + 오늘 아침 D+0 예보, 경로 중심·빠르면·늦으면 + 비교 경로·참값), 지표(`wb_lead_metrics`, `need_contingency`, `first_need_eval`, `threshold_sensitivity`, `rain_verification`), 오차표(`eto_error_rows`·`save_error_table`·`pooled_errors`·`err_lookup`), 편향 보정 자리(`apply_bias`, 기본 없음 — #10), 한 발표의 전망(`service_outlook`) | 4 | 구현 |
+| `fcst_wb_report.py` + `fcst_error_table.csv` | (G4) 예보 물수지 검증 엑셀(7시트, 라이브 수식) / 서비스 엑셀(관수 전망 7시트). 오차표는 지점 × 해 × 발표 × 선행일 × 월 행(일·3일 누적) — 서비스는 여러 해를 표본 수로 가중해 합치고, 검증은 검증 연도를 뺀 다른 해 행을 씀. 지점 행이 없으면 stn 0(기본값) 행, 그것도 없으면 전 지점을 합침 | 4 | 구현 |
 | `kma_fcst.py` + `kma_grid.py` | 운영용 API 수집(02:10·17:10, 페이징, 원자료 보관, 실패 시 직전 발표 사용), 위경도 → 격자 변환 | 5 | 예정 |
 
 **실행**
@@ -397,6 +399,20 @@ python cropwater_fcst.py calib-sky --fcst data/fcst_101_73134 --obs output/eto10
 python cropwater_fcst.py calib --obs output/eto101_apple_20260101_20260928.xlsx --stn 101 --coef rs_coef_2026.csv
 python cropwater_fcst.py verify --fcst data/fcst_101_2025 --obs output/eto101_apple_20250101_20251231.xlsx --stn 101 \
        --grid 73_134 --coef rs_coef_2026.csv --s4-coef rs_sky_coef.csv
+
+# 5) (G4) 예보 ETo 오차표 — 해마다 한 번. 검증과 같은 계수 조건으로 (fcst_error_table.csv에 지점·해 행을 바꿔 넣음)
+python cropwater_fcst.py errtable --fcst data/fcst_101_73134 --obs output/eto101_apple_20260101_20260928.xlsx --stn 101
+python cropwater_fcst.py errtable --fcst data/fcst_101_2025 --obs output/eto101_apple_20250101_20251231.xlsx --stn 101 \
+       --grid 73_134 --coef rs_coef_2026.csv --s4-coef rs_sky_coef.csv
+
+# 6) (G4) 예보 물수지 검증 엑셀 — 범위의 오차는 검증 연도를 뺀 다른 해 오차표로 채점
+python cropwater_fcst.py wbverify --fcst data/fcst_101_73134 --obs output/eto101_apple_20260101_20260928.xlsx --stn 101
+#    → output/fcst_wbverify(101)_<격자>_<첫 채점 대상일>_<끝 채점 대상일>.xlsx   (--auto-irrigate: 관수 규칙 시나리오, 파일명 _irrig)
+
+# 7) (G4) 서비스 엑셀 — 한 발표의 관수 전망. S4는 운영 계수(rs_sky_coef.csv, 기본값), 오차표는 여러 해 합침
+python cropwater_fcst.py service --fcst data/fcst_101_73134 --obs output/eto101_apple_20260101_20260928.xlsx --stn 101 \
+       --run "2026-05-15 02" --irrig 관수기록.csv
+#    → output/fcst_service(101)_20260515_02.xlsx   (--run이 없으면 자료의 가장 최근 서비스 발표)
 ```
 
 - `--fcst`: 과거 예보 CSV 폴더(또는 파일 목록, 여러 폴더 가능). 파일마다 첫 줄로 형식을 판별합니다.
@@ -452,6 +468,46 @@ rs_coef.csv ─────→ rs_model.load_coef()   ──┘   예보 ETo(S3�
 - 일별비교 열 배치는 `daily_layout(sky)`가 정합니다. 하늘상태가 없으면 이전 배치(A~BB)와 같고, 있으면 입력·Rs·ETo·오차 묶음에 S4 열이 들어갑니다. 다른 시트는 열 문자가 아니라 열 키(`DB`)로 참조합니다.
 - LibreOffice 재계산 결과가 Python 계산과 10⁻¹³ 이내로 일치합니다(G3·G3 재검증 점검).
 - 요약 시트의 긴 해석 문장(④~)은 여러 행으로 나눠 씁니다. 병합 칸의 줄바꿈·행 높이는 엑셀과 LibreOffice가 다르게 그려 차트와 겹치기 때문입니다.
+
+**처리 흐름 (G4: errtable / wbverify / service)**
+
+```
+과거·운영 단기예보 + 01-Cycle 워크북 ──→ fcst_wb.prepare()          forecast_table과 같은 예보표(모든 서비스 발표·대상일, ETc_main, 강수·기대 강수·강수확률)
+                                        │  apply_bias()              편향 보정 자리 — 기본 없음(#10)
+                                        │
+   errtable ──→ eto_error_rows() → save_error_table()               예보 ETo 오차표: 발표 × 선행일 × 월(0 = 전체)의 RMSE·MBE·관측 평균, 3일 누적
+                                        │
+관수 기록 CSV ─→ observed_wb()                                     관측 물수지(식84·85·86·88, Ks = Dr,i-1). 결측일은 fill_from_forecast()(그날 아침 D+0 예보)
+                                        │                            (wbverify --auto-irrigate: 전날 끝 Dr ≥ RAW면 Dr만큼 관수)
+                                        ▼
+   wbverify ──→ forecast_runs()   발표마다 출발 = 관측 Dr(D−1 끝) [저녁은 + 오늘 아침 D+0 예보로 하루]
+                                  경로: 중심(기대 강수) · 빠르면(비 없음, ETc×(1+r)) · 늦으면(예보 강수 전부, ETc×(1−r))
+                                        · 예보 강수 그대로 · 비 무시 · 관측 강수 · 기준선 · 참값(관측)
+                                  r = err_lookup(pooled_errors(오차표, 검증 연도 제외))
+                 ├─ wb_lead_metrics() / wb_month_metrics()   예상 Dr 오차(RMSE·MBE·개선율)
+                 ├─ need_contingency()                       대상일별 관수 필요 판정 적중
+                 ├─ first_need_eval() / first_need_summary() 관수 필요 예상일·판정·범위 적중 (주 지표 3일·참고 포함 4일)
+                 ├─ threshold_sensitivity() / rain_verification()
+                 ▼
+                 fcst_wb_report.build_wbverify_workbook()   → 검증 엑셀
+   service ───→ service_outlook() + recent_bias()           한 발표의 전망(오차표는 여러 해 합침, S4 운영 계수)
+                 ▼
+                 fcst_wb_report.build_service_workbook()    → 서비스 엑셀
+```
+
+**예보 물수지 검증 엑셀 (fcst_wb_report.py)**
+- 시트: 요약 / 발표별 / 발표요약 / 관측물수지 / 오차표 / 설정 / 방법
+- 값으로 넣는 것: 예보 입력(예보 ETc = Kc × 예보 ETo, 예보 강수·기대 강수·강수확률), 관측 ETc·강수, 상대 오차 r, 제외 사유, 요약 E·F표(예보 강수 검증·판정 기준 민감도, Python 계산)
+- 수식으로 계산하는 것: 관측 물수지(관수 규칙 시나리오 스위치 포함), 발표별 8개 경로 고갈량(한 칸 수식 `MIN(MAX(Dr − P + Ks·ETc, 0), TAW)`), 관수 필요 판정, 발표요약의 예상일·판정·범위 적중, 요약 A~D표
+- 설정 시트의 토양 값·판정 기준 고갈량(기본 = RAW)·평가 대상일 수(3 또는 4)·관수 규칙 스위치를 바꾸면 다시 계산됩니다.
+- 예상일(처음 필요 순번)은 MINIFS 대신 순번 1~4의 COUNTIFS 중첩 IF로 씁니다(구형 엑셀·LibreOffice 호환).
+- LibreOffice 재계산 결과가 Python 계산과 5 × 10⁻¹³ 이내로 일치합니다(G4 점검).
+
+**서비스 엑셀 (fcst_wb_report.py)** — 한 발표의 관수 전망
+- 시트: 관수 전망 / 예보 물수지 / 관측 물수지 / 오차표 / 편향 점검 / 설정 / 방법
+- '관수 전망': 어제 끝 Dr·상태, 3일 누적 ETc ± 오차(주 지표), 예보 강수·기대 강수, 관수 필요 예상일(중심·빠르면·늦으면), 권장 관수량(순·공급), 날짜별 표(마지막 날 회색 '참고')
+- '관측 물수지' 노란 칸(관수 기록)을 고치면 어제 끝 Dr → 예보 물수지 → 전망이 다시 계산됩니다. 예보 ETo·강수·r은 값입니다(예보 ETo의 PM 수식은 H2 검증 엑셀에 있음).
+- '편향 점검'(#10): 오차표의 월·발표·선행일별 MBE와, 예보표에 있으면 이 발표 이전 최근 30일의 예보 − 관측
 
 **격자와 읍면동**
 - API는 격자(nx, ny)로 요청합니다.
@@ -545,8 +601,8 @@ rs_coef.csv ─────→ rs_model.load_coef()   ──┘   예보 ETo(S3�
 `cropwater_station.py`는 Python이 값이 아닌 수식 문자열을 셀에 씁니다. 설정값 변경 시 전체 시트가 자동 재계산되며, 셀 단위로 계산 과정을 추적할 수 있습니다.
 02-Cycle 검증 엑셀(`fcst_report.py`)도 같은 원칙입니다. 입력을 바꿔 PM을 여러 번 다시 풀어야 하는 오차분해 시트만 값으로 넣고, 시트에 그 사실을 적습니다.
 
-**무관수 가정 명시**
-물수지는 자연강우만 반영합니다. 관수가 있었다면 Dr이 실제보다 높게 산출됩니다. 이 한계는 결과요약·물수지 시트 헤더에 명시되어 있습니다.
+**관수 기록이 없으면 무관수**
+관수 기록(`--irrig` 또는 물수지 시트 노란 칸)이 없으면 자연강우만 반영합니다. 실제로 관수했다면 Dr이 실제보다 높게 나옵니다. 결과요약·물수지 시트 머리에 적어 둡니다. 예보 물수지의 예상 Dr도 '예보 기간에 관수하지 않으면'의 값입니다.
 
 **캐시 우선**
 `stations_backup.csv`는 기상청 API허브 호출 결과를 로컬 캐시합니다. API 연결 실패 시 자동으로 캐시를 사용하고, 성공 시 갱신합니다.

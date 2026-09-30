@@ -561,6 +561,15 @@ def daily_inputs(arch, run, targets, lat=None, lon=None):
             else:
                 row["pop"] = float((w * x["value"].values).sum() / w.sum() / 100) if ok else None
                 row["pop_max"] = float(x["value"].max() / 100) if ok else None
+                # 기대 강수량(G4 비교용): 시각마다 강수량 × 강수확률. 예보 강수량은 비가 온다면의 양이고(강수확률 60% 이상인 시각에만 값이 있음)
+                # 강수확률을 곱하면 기댓값이 된다. 강수확률이 없는 시각은 1로 둔다
+                if pcp is not None and len(pcp):
+                    amt = np.where(pcp["code"].values, 3 * np.array([PCP_CODE_MMH.get(int(round(v)), 0.0) for v in pcp["value"]]),
+                                   pcp["value"].values.astype(float))
+                    pp = (x["value"].reindex(pcp.index).values / 100) if x is not None else np.full(len(pcp), np.nan)
+                    row["rain_exp"] = float(np.sum(amt * np.where(np.isnan(pp), 1.0, pp)))
+                else:
+                    row["rain_exp"] = None
         rows.append(row)
     return pd.DataFrame(rows)
 

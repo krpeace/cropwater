@@ -40,11 +40,12 @@
 | :--- | :--- |
 | **기준증발산량 (ETo)** | FAO-56 Penman-Monteith 계산식 적용, 일사 결측 시 Ångström 보정 |
 | **작물증발산량 (ETc)** | 생육단계별 Kc 보간, 국지 기상 보정 및 멀칭 보정 |
-| **일별 근권 물수지** | TAW·RAW·Dr·Ks·심층침투(DP) 추적 및 스트레스 보정 증발산량(ETc_adj) 산정 |
+| **일별 근권 물수지** | TAW·RAW·Dr·Ks·심층침투(DP) 추적 및 스트레스 보정 증발산량(ETc_adj) 산정. 관수 기록(날짜·관수량 CSV 또는 엑셀 노란 칸)을 넣으면 Dr에 반영 |
 | **다지점 일괄 분석** | 30개 이상 지점 동시 계산 및 관수 필요 달력(히트맵) 시각화 |
 | **지점 메타 자동화** | 기상청 API 연동, 위도·고도·풍속계 높이 자동 수집 및 로컬 캐싱 |
 | **51개 작물 라이브러리** | FAO-56 표준 파라미터(Kc·Zr·p) 내장 (`crops_library.csv`) |
-| **단기예보 ETo·ETc 예측** (02-Cycle, H2 검증 완료 → 물수지 전망 설계) | 기상청 단기예보(아침 02시 → 오늘~D+3, 저녁 17시 → 내일~D+4)로 ETo·ETc 예측, 일사는 기온교차·강수확률·하늘상태로 추정(S4), 과거 예보로 선행시간별·월별 검증 |
+| **단기예보 ETo·ETc 예측** (02-Cycle, H2 검증 완료) | 기상청 단기예보(아침 02시 → 오늘~D+3, 저녁 17시 → 내일~D+4)로 ETo·ETc 예측, 일사는 기온교차·강수확률·하늘상태로 추정(S4), 과거 예보로 선행시간별·월별 검증 |
+| **관수 필요 예상일** (02-Cycle G4) | 어제 끝 관측 Dr + 예보 ETc − 기대 강수(강수량 × 강수확률) → 며칠 뒤 Dr ≥ RAW가 되는 날과 범위(빠르면·늦으면), 3일 누적 ETc ± 오차, 권장 관수량. 서비스(관수 전망) 엑셀 |
 
 ---
 
@@ -96,6 +97,7 @@ python cropwater_station.py --stn 216 --crop kimchi_cabbage --start 20260701 --e
 | `--crop` | 작물 ID | `apple` |
 | `--start` / `--end` | 조회 기간 YYYYMMDD (미래 날짜는 전날로 자동 조정) | `20260401` |
 | `--bud` | 생육 시작일 (발아·정식일) | `20260401` |
+| `--irrig` | 관수 기록 CSV (머리행 `날짜,관수량_mm[,메모]`, 공급량 mm = 10a당 톤) → 물수지 시트 I열 | `관수기록.csv` |
 | `--out` | 출력 파일명 (생략 시 자동 생성) | `result.xlsx` |
 
 > 파라미터를 생략하면 대화형 프롬프트가 순서대로 묻습니다.
@@ -136,6 +138,12 @@ python cropwater_fcst.py calib-sky --fcst data/fcst_101 --obs output/eto101_appl
 python cropwater_fcst.py calib --obs output/eto101_apple_20260101_20260928.xlsx --stn 101 --coef rs_coef_2026.csv
 python cropwater_fcst.py verify --fcst data/fcst_101_2025 --obs output/eto101_apple_20250101_20251231.xlsx --stn 101 \
        --grid 73_134 --coef rs_coef_2026.csv --s4-coef rs_sky_coef.csv
+
+# (G4) 예보 ETo 오차표(해마다) → fcst_error_table.csv / 예보 물수지 검증 엑셀 / 서비스(관수 전망) 엑셀
+python cropwater_fcst.py errtable --fcst data/fcst_101 --obs output/eto101_apple_20260101_20260928.xlsx --stn 101
+python cropwater_fcst.py wbverify --fcst data/fcst_101 --obs output/eto101_apple_20260101_20260928.xlsx --stn 101
+python cropwater_fcst.py service  --fcst data/fcst_101 --obs output/eto101_apple_20260101_20260928.xlsx --stn 101 \
+       --run "2026-05-15 02" --irrig 관수기록.csv
 ```
 
 | 파라미터 | 설명 |
@@ -147,6 +155,10 @@ python cropwater_fcst.py verify --fcst data/fcst_101_2025 --obs output/eto101_ap
 | `--compare` | (선택) 비교할 다른 격자의 과거 예보 → '격자비교' 시트 |
 | `--s4-coef` | (선택) 다른 해의 운영 S4 계수 파일(`rs_sky_coef.csv`). 주면 교차검증 대신 그대로 적용 — 독립 연도 검증 |
 | `--grid` | (선택) 파일에 격자 정보가 없을 때(요소별 KST CSV) 격자 `nx_ny`, 예: `73_134` |
+| `--err` | (errtable·wbverify·service) 예보 ETo 오차표, 기본 `fcst_error_table.csv`. wbverify는 검증 연도를 뺀 다른 해 행으로 범위를 채점 |
+| `--irrig` | (wbverify·service) 관수 기록 CSV → 관측 물수지(출발 고갈량)에 반영 |
+| `--auto-irrigate` | (wbverify) 관수 규칙 시나리오: 전날 끝 Dr ≥ RAW면 그 Dr만큼 관수 |
+| `--run` | (service) 발표시각 `YYYY-MM-DD HH`(02 또는 17). 없으면 자료의 가장 최근 서비스 발표. S4는 운영 계수(`--s4-coef` 기본 `rs_sky_coef.csv`) |
 
 > 가설·합격 기준·게이트 판정은 [docs/VALIDATION.md](docs/VALIDATION.md), 이론은 [THEORY.md 9장](docs/THEORY.md)에 있습니다.
 >
@@ -154,6 +166,9 @@ python cropwater_fcst.py verify --fcst data/fcst_101_2025 --obs output/eto101_ap
 > - 2026년(월 단위 교차검증), 대상일 4/2~9/19: D+1 RMSE 아침 0.94·저녁 0.82 mm/일, 지속성 대비 45~54% 개선
 > - 2025년(다른 해, 2026년 계수 고정), 대상일 4/1~10/4: D+1 RMSE 아침 0.94·저녁 0.84 mm/일, 최소 개선율 34%·42% — 아침 발표는 여유가 작음
 > - 비교 S3(기온교차 + 강수유무): 2026년 D+1 0.99·0.88, 2025년 1.01·0.92(아침 미달). 한여름(6~8월) 한두 달이 약함
+>
+> 예보 물수지(G4, 두 해, 사과·양토 RAW 60 mm): 3일 예상 고갈량 오차 7~15 mm로 예보 없이 보는 것보다 22~42% 작음. 오차의 대부분은 강수 예보에서 옴(강수가 완벽하면 0.8~2.0 mm).
+> 관수 필요 예상일은 사건의 절반가량이 같은 날이고, 범위(빠르면~늦으면)가 실제 날짜를 모두 담음 — 실제 날짜가 '빠르면'보다 앞선 적 없음
 
 ---
 
@@ -178,7 +193,7 @@ python cropwater_fcst.py verify --fcst data/fcst_101_2025 --obs output/eto101_ap
 | **원데이터** | ASOS 일별 원자료 |
 | **계산과정** | FAO-56 전 과정 라이브 수식 |
 | **결과요약** | ETo·ETc 기간 합계 + 물수지 요약 (ΣPeff, 유효강수율, 관수 필요 일수 등) |
-| **물수지** | 일별 Dr·Ks·DP·ETc_adj·관수필요(●) 라이브 수식 |
+| **물수지** | 일별 Dr·Ks·DP·ETc_adj·관수필요(●) 라이브 수식. I열(노란 칸) = 관수량 입력 |
 | **계산근거** | FAO-56 식번호·출처·적용 설명 |
 
 ### cropwater_multi.py (5시트)
@@ -204,6 +219,22 @@ python cropwater_fcst.py verify --fcst data/fcst_101_2025 --obs output/eto101_ap
 | **격자비교** (선택) | 두 격자 예보의 성능·입력 편향·직접 차이 (Python 계산값) |
 | **Rs계수 / SKY계수 / 관측 / 설정** | S3 계수·H1 재검증 / S4 교차검증·운영 계수(하늘상태가 있을 때) / ASOS 관측 ETo·Kc / 지점·예보·Kc 설정 |
 | **방법 / 차트자료** | 정의·규칙·한계 / 차트 원본 |
+
+### cropwater_fcst.py wbverify (7시트) — 예보 물수지 검증 (G4)
+
+| 시트 | 내용 |
+| :--- | :--- |
+| **요약** | 예상 고갈량 오차(중심·비교 경로·기준선), 관수 필요 판정 적중, 관수 필요 예상일·범위 적중, 월별, 예보 강수 검증, 판정 기준 민감도, 해석 |
+| **발표별 / 발표요약** | 발표 × 대상일 8개 경로 고갈량(라이브 수식) / 발표마다 예상일(중심·빠르면·늦으면·참값)·판정 |
+| **관측물수지 / 오차표 / 설정 / 방법** | 관측 물수지(관수 규칙 스위치) / 범위의 상대 오차 r / 토양·판정 기준·평가 기간 / 방법 |
+
+### cropwater_fcst.py service (7시트) — 관수 전망 (G4)
+
+| 시트 | 내용 |
+| :--- | :--- |
+| **관수 전망** | 어제 끝 Dr·상태, 3일 누적 ETc ± 오차(주 지표), 예보·기대 강수, 관수 필요 예상일(빠르면·늦으면), 권장 관수량, 날짜별 표(마지막 날 '참고') |
+| **예보 물수지 / 관측 물수지** | 세 경로 고갈량(수식) / 어제까지 물수지 — 노란 칸에 관수량을 적으면 전망이 다시 계산됨 |
+| **오차표 / 편향 점검 / 설정 / 방법** | 예보 ETo 오차 / 월·선행일별 편향(보정은 안 함) / 토양 값 / 방법 |
 
 📖 자세한 해석 방법 → [docs/RESULTS_GUIDE.md](docs/RESULTS_GUIDE.md)
 
@@ -243,23 +274,28 @@ cropwater/
 ├── cropwater_station.py        ← 단일 지점 분석 → 6시트 Excel
 ├── cropwater_multi.py          ← 다지점 비교 → 히트맵 + 차트
 │
-├── cropwater_fcst.py           ← (02-Cycle) 단기예보 ETo·ETc 예측 검증 CLI: calib / calib-sky / verify
-├── fcst_archive.py             ← 과거 단기예보 CSV 파싱(포털·OpenAPI 형식) → 발표별 일 입력
+├── cropwater_fcst.py           ← (02-Cycle) 단기예보 ETo·ETc 예측 CLI: calib / calib-sky / verify / errtable / wbverify / service
+├── fcst_archive.py             ← 과거 단기예보 CSV 파싱(포털·OpenAPI 형식) → 발표별 일 입력(기대 강수 포함)
 ├── rs_model.py                 ← 일사량(Rs) 추정: S3 식(50) + 강수유무, S4 + 강수확률·하늘상태 구름 비율, 계수 적합
 ├── obs_daily.py                ← cropwater_station 워크북 → 관측 ETo·Kc
-├── fcst_report.py              ← 검증 엑셀 (11~13시트, 라이브 수식)
+├── fcst_report.py              ← H2 검증 엑셀 (11~13시트, 라이브 수식)
+├── fcst_wb.py                  ← (G4) 관측·예보 물수지, 관수 필요 예상일·범위, 오차표, 서비스 전망
+├── fcst_wb_report.py           ← (G4) 예보 물수지 검증 엑셀 / 서비스(관수 전망) 엑셀
 │
 ├── crops_library.csv           ← 51개 작물 Kc·Zr·p (FAO-56 Table 12·22)
 ├── stations_backup.csv         ← ASOS 지점 메타 캐시
 ├── rs_coef.csv                 ← Rs 추정 계수 S3 (FAO 기본값 + 지점 보정값)
+├── rs_coef_2026.csv            ← S3 계수 (2026년 관측, 2025년 독립 검증용)
 ├── rs_sky_coef.csv             ← Rs 추정 계수 S4 (지점 × 선행일, calib-sky)
+├── fcst_error_table.csv        ← 예보 ETo 오차표 (지점 × 해 × 발표 × 선행일 × 월, errtable)
 │
 ├── output/                     ← 분석 결과물 저장 폴더 (.gitignore로 xlsx 제외)
 │   └── .gitkeep
 │
 ├── tests/
-│   ├── test_fao56.py           ← FAO-56 핵심 계산 단위 테스트 (pytest)
-│   └── test_fcst.py            ← 02-Cycle 예보 모듈 단위 테스트
+│   ├── test_fao56.py           ← FAO-56 핵심 계산·물수지 한 걸음·관수 기록 단위 테스트 (pytest)
+│   ├── test_fcst.py            ← 02-Cycle 예보 모듈 단위 테스트
+│   └── test_wb.py              ← 02-Cycle G4 예보 물수지 단위 테스트
 │
 └── docs/
     ├── THEORY.md               ← 관수·토양학 이론 (농대생 입문용)

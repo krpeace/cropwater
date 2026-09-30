@@ -21,6 +21,8 @@ cropwater_station.py — 단일 지점 기준증발산(ETo)·작물증발산(ETc
 [실행]
   pip install requests openpyxl
   python cropwater_station.py           ← 실행하면 지점번호·기간을 물어봄
+  python cropwater_station.py --stn 101 --crop apple --irrig 관수기록.csv   ← 관수 기록을 물수지에 반영
+    (관수기록.csv 머리행: 날짜,관수량_mm[,메모] / 관수량은 공급량 mm, 10a당 1톤 = 1 mm)
   (인증키는 apikey.txt 파일에 아래 2줄로 저장해두면 매번 안 물어봄)
     DATA_GO_KR=<공공데이터포털 키, 기상데이터용>
     KMA_HUB=<기상청 API허브 키, 지점정보 자동조회용>
@@ -34,7 +36,7 @@ from fao56_core import (num, fetch_asos as _fetch_asos_raw, fetch_station_table,
                          KC_SCENARIOS, KCB_SCENARIOS, kc_climate_adjust,
                          stage_of_date, kc_of_date,
                          load_crop_library, crops_sorted,
-                         wind_2m)   # ← 공통 모듈(같은 폴더 필요)
+                         wind_2m, load_irrigation_log)   # ← 공통 모듈(같은 폴더 필요)
 
 FONT="맑은 고딕"; GREEN="2E6A4C"; BLUE="2B6E86"; BROWN="A8681B"; LIGHT="EFF1EC"; YEL="FBEED2"; WARN="F4C7B8"
 thin=Side(style="thin",color="D0D3CC"); BORDER=Border(thin,thin,thin,thin)
@@ -356,16 +358,19 @@ def build_workbook(rows, p, out):
     kv(13,"ETc_PM 일평균 (mm/d)",f"=AVERAGE(계산과정!AA2:AA{last})","0.00")
     # 물수지 요약
     kv(14,"","")  # 빈 행
-    H(ws,15,1,"물수지 요약 — 무관수(자연강우) 가정, FAO-56 Ch.8",GREEN,True,11); ws.merge_cells("A15:D15")
+    H(ws,15,1,"물수지 요약 — 강우 + 물수지 시트 I열의 관수량(비어 있으면 무관수), FAO-56 Ch.8",GREEN,True,11); ws.merge_cells("A15:D15")
     kv(16,"기간 총강수 ΣP (mm)",f"=SUM(물수지!F2:F{last})","0.0")
-    kv(17,"유효강수 (근권 흡수분, mm)",f"=SUM(물수지!F2:F{last})-SUM(물수지!H2:H{last})","0.0")
+    kv(17,"유효강수 (근권 흡수분, mm)",
+       f'=IF(SUM(물수지!I2:I{last})>0,"— (관수가 있어 강수·관수의 흡수분을 나눌 수 없음)",SUM(물수지!F2:F{last})-SUM(물수지!H2:H{last}))',"0.0")
     kv(18,"심층침투 ΣDP (mm)",f"=SUM(물수지!H2:H{last})","0.0")
-    kv(19,"유효강수율 (%)",f'=IFERROR((SUM(물수지!F2:F{last})-SUM(물수지!H2:H{last}))/SUM(물수지!F2:F{last})*100,"—")',"0.0")
+    kv(19,"유효강수율 (%)",
+       f'=IF(SUM(물수지!I2:I{last})>0,"—",IFERROR((SUM(물수지!F2:F{last})-SUM(물수지!H2:H{last}))/SUM(물수지!F2:F{last})*100,"—"))',"0.0")
     kv(20,"관수 필요 발생 일수",f"=COUNTIF(물수지!M2:M{last},\"●\")","0")
     kv(21,"필요 순관수량 ΣIn (mm)",f"=SUM(물수지!N2:N{last})","0.0")
     kv(22,"필요 총관수량 ΣIg (mm)",f"=SUM(물수지!O2:O{last})","0.0")
     kv(23,"TAW (mm)",f"={KR['TAW']}","0.0")
     kv(24,"RAW (mm)",f"={KR['RAW']}","0.0")
+    kv(25,"입력 관수량 합계 ΣI (mm, 공급)",f"=SUM(물수지!I2:I{last})","0.0")
     # 일별표
     rr=26
     for c,h in enumerate(["일자","ETo_PM(mm)","ETo_pan(mm)","대형증발량(mm)","ETc_PM(mm)","강수(mm)","Dr(mm)","Ks","관수"],1): H(ws,rr,c,h,GREEN,True)
@@ -381,11 +386,11 @@ def build_workbook(rows, p, out):
     # ===== 물수지 (FAO-56 Ch.8, 식82~88, 라이브 수식) =====
     WB = "물수지"
     ws=wb.create_sheet(WB)
-    # ※ 무관수(자연강우만) 가정 — 실측 관수 데이터 없음.
-    #   In/Ig는 FAO-56 식(85) 역산한 이론적 필요량이며 실제 관수 후 Dr 리셋 없음.
-    #   다음 버전에서 실측 관수량 입력 시 식(85)에 직접 반영 예정.
+    # ※ 관수량(I열, 노란 칸)은 실제로 준 공급량(mm). --irrig 관수 기록 CSV로 채우거나 직접 입력(없으면 0 = 무관수).
+    #   근권에는 공급량 × Ea가 들어간다. In/Ig는 ● 시점에 근권을 포장용수량까지 채우는 데 필요한 이론적 양.
+    #   Ks는 전날 끝 고갈량 Dr,i-1로 정한다(FAO-56 원식, VALIDATION #15, 2026-09-30).
     wb_heads=["일자","생육단계","Kc","ETo\n(mm)","ETc\n(mm)","강수P\n(mm)",
-              "Dr,i-1\n(mm)","DP\n(mm)","Dr비후\n(mm)","Ks","ETc_adj\n(mm)",
+              "Dr,i-1\n(mm)","DP\n(mm)","관수량 I\n(mm, 공급)","Ks","ETc_adj\n(mm)",
               "Dr,i\n(mm)","관수\n필요","필요 순관수량\nIn (mm)","필요 총관수량\nIg (mm)"]
     wb_fmts=[None,"@","0.000","0.00","0.00","0.0","0.0","0.0","0.0","0.00","0.00","0.0",None,"0.0","0.0"]
     SOIL_BROWN = "8B6914"
@@ -397,10 +402,12 @@ def build_workbook(rows, p, out):
     _RAW = KR['RAW']
     _DR0 = KR['DR0']
     _EA  = KR['EA']
+    irrig = p.get("irrig") or {}
     for i in range(2, last+1):
         r = i
         # G: Dr,i-1 — 첫 행은 초기값, 이후는 전일 Dr,i(L열)
         dr_prev = _DR0 if i == 2 else f"L{r-1}"
+        day = rows[i-2]["tm"]
         WF = {
             1: f"=계산과정!A{r}",                     # 일자
             2: f"=계산과정!V{r}",                     # 생육단계
@@ -409,17 +416,17 @@ def build_workbook(rows, p, out):
             5: f"=D{r}*C{r}",                         # ETc = ETo × Kc
             6: f"={S}!N{r}",                          # 강수량 P (원데이터 N열)
             7: f"={dr_prev}",                         # Dr,i-1
-            8: f"=MAX(F{r}-K{r}-G{r}, 0)",            # DP = max(P − ETc_adj − Dr,i-1, 0) [식88 FAO-56 원식]
-            9: f"=MAX(G{r}-F{r}, 0)",                 # Dr_비후 = max(Dr,i-1 − P, 0) (Ks 판단용)
-            10: f"=IF(I{r}<={_RAW}, 1, ({_TAW}-I{r})/({_TAW}-{_RAW}))",  # Ks [식84]
+            8: f"=MAX(F{r}+I{r}*{_EA}-K{r}-G{r}, 0)",  # DP = max(P + I·Ea − ETc_adj − Dr,i-1, 0) [식88 FAO-56 원식]
+            9: float(irrig.get(day, 0.0)),            # 관수량 I (공급량, mm) — 입력 칸
+            10: f"=IF(G{r}<={_RAW}, 1, ({_TAW}-G{r})/({_TAW}-{_RAW}))",  # Ks [식84] — 전날 끝 고갈량 Dr,i-1로 판단
             11: f"=J{r}*E{r}",                        # ETc_adj = Ks × ETc
-            12: f"=MIN(MAX(G{r}-F{r}+K{r}+H{r}, 0), {_TAW})",  # Dr,i [식85·86] = Dr,i-1 − P + ETc_adj + DP, 0≤Dr≤TAW
+            12: f"=MIN(MAX(G{r}-F{r}-I{r}*{_EA}+K{r}+H{r}, 0), {_TAW})",  # Dr,i [식85·86] = Dr,i-1 − P − I·Ea + ETc_adj + DP
             13: f'=IF(L{r}>={_RAW},"●","")',          # 관수필요 판정
             14: f'=IF(M{r}="●",L{r},0)',              # 순관수 In = Dr(근권 전량보충)
             15: f'=IF(N{r}>0,N{r}/{_EA},0)',           # 총관수 Ig = In/Ea
         }
         for c in range(1, 16):
-            cell = C(ws, r, c, WF[c], wb_fmts[c-1])
+            cell = C(ws, r, c, WF[c], wb_fmts[c-1], fill=(YEL if c == 9 else None))
             if c == 1: cell.number_format = "yyyy-mm-dd"
             # Dr,i 열: RAW 초과 시 경고색
             if c == 12:
@@ -456,16 +463,17 @@ def build_workbook(rows, p, out):
          ("TAW [식82]","총유효수분 TAW = 1000·(θFC−θWP)·Zr (mm). θFC/θWP는 FAO-56 Table 19, Zr은 Table 22 기준값."),
          ("RAW [식83]","쉽게이용가능수분 RAW = p·TAW (mm). Dr이 RAW에 도달하면 작물이 스트레스를 받기 시작. p는 Table 22 기준값."),
          ("Ks [식84]","수분스트레스계수. Dr≤RAW이면 Ks=1(무스트레스). Dr>RAW이면 Ks=(TAW−Dr)/(TAW−RAW), 0~1 범위."),
-         ("Dr [식85]","일별 근권 고갈량. Dr,i = Dr,i-1 − P + ETc,adj + DP. 범위: 0 ≤ Dr ≤ TAW."),
-         ("DP [식88]","심층침투(FAO-56 원식). DP = max(P − ETc,adj − Dr,i-1, 0). 그날 증발산으로 쓰고 근권을 포장용수량까지 채우고도 남는 비만 아래로 배수. 큰 비가 오면 Dr,i = 0."),
-         ("Ks 판단 시점","그날 비가 먼저 들어간 뒤의 고갈량(Dr비후 = max(Dr,i-1 − P, 0))으로 Ks를 정함. FAO-56 예시는 전날 끝 고갈량 Dr,i-1을 쓰며, 비 온 날에만 차이가 남."),
+         ("Dr [식85]","일별 근권 고갈량. Dr,i = Dr,i-1 − P − I·Ea + ETc,adj + DP. 범위: 0 ≤ Dr ≤ TAW. I는 물수지 시트 I열의 관수량(공급량)."),
+         ("DP [식88]","심층침투(FAO-56 원식). DP = max(P + I·Ea − ETc,adj − Dr,i-1, 0). 그날 증발산으로 쓰고 근권을 포장용수량까지 채우고도 남는 물만 아래로 배수. 큰 비가 오면 Dr,i = 0."),
+         ("Ks 판단 시점","전날 끝 고갈량 Dr,i-1로 Ks를 정함(FAO-56 원식, 2026-09-30 결정). 이전에는 그날 비가 먼저 들어간 뒤의 고갈량을 썼으며, 고갈량이 RAW를 넘은 상태에서 비가 온 날에만 차이가 남."),
          ("ETc_adj [식81]","스트레스 보정 후 증발산. ETc_adj = Ks · Kc · ETo. Ks<1이면 실제 소비량이 잠재 ETc보다 줄어듦."),
-         ("관수필요 판정","Dr,i ≥ RAW이면 관수 필요(●). 무관수(자연강우만) 가정이므로 ● 이후에도 Dr 리셋 없이 계속 누적됨. 실측 관수 데이터는 다음 버전에서 식(85)에 직접 반영 예정."),
+         ("관수량 I (입력)","물수지 시트 I열(노란 칸)에 실제로 준 관수량(공급량, mm)을 적으면 Dr이 다시 계산됨. 1 mm = 10a(1,000 m²)당 1톤. 근권에는 공급량 × 관수효율 Ea가 들어감. 실행 시 --irrig 관수기록.csv(날짜, 관수량_mm)로 미리 채울 수 있음. 비어 있으면 무관수(자연강우만)."),
+         ("관수필요 판정","Dr,i ≥ RAW이면 관수 필요(●). 관수량을 입력하지 않으면 ● 이후에도 Dr이 계속 누적됨(무관수)."),
          ("필요 순관수량 In","net irrigation depth. 관수필요(●) 시점의 Dr 값. 근권을 포장용수량(Dr=0)까지 보충하는 데 필요한 순수량(mm). 이론적 필요량이며 실측 관수량이 아님."),
          ("필요 총관수량 Ig","gross irrigation depth. In을 관수효율 Ea로 나눈 값(Ig = In/Ea). 손실(미도달·증발 등)을 포함한 실제 공급 필요량. 점적관수 Ea=0.95 기준."),
          ("계산과정 시트","모든 셀이 라이브 수식. 셀 클릭 시 수식 확인 가능. 설정값 변경 시 자동 재계산됨."),
-         ("물수지 시트","라이브 수식. 설정의 토양 파라미터(θFC/θWP/Zr/p) 변경 시 전체 자동 재계산됨."),
-         ("주의","일사·대형증발량은 지점별 관측 여부 상이. 물수지는 RO(지표유출)=0, CR(모관상승)=0, 실측 관수량=0(무관수 가정)으로 단순화.")]
+         ("물수지 시트","라이브 수식. 설정의 토양 파라미터(θFC/θWP/Zr/p)나 I열 관수량을 바꾸면 전체 자동 재계산됨."),
+         ("주의","일사·대형증발량은 지점별 관측 여부 상이. 물수지는 RO(지표유출)=0, CR(모관상승)=0으로 단순화. 관수량을 입력하지 않으면 무관수(자연강우만) 가정.")]
     rr=0
     for k,v,*hd in doc:
         rr+=1; head=bool(hd and hd[0])
@@ -502,6 +510,8 @@ def main():
                     help="작물 crop_id (기본: apple). 사용 가능한 목록은 crops_library.csv 참조")
     ap.add_argument("--bud-date",dest="bud_date",default=None,
                     help="정식/파종/발아일 YYYYMMDD. 작물마다 실제 캘린더가 다르므로 특히 1년생 작물(배추 등)은 필수 확인 권장.")
+    ap.add_argument("--irrig",default=None,
+                    help="관수 기록 CSV(머리행: 날짜,관수량_mm[,메모]). 공급량(mm, 10a당 1톤 = 1 mm)을 물수지 시트 I열에 채움")
     ap.add_argument("--out",default="eto_상세.xlsx")
     a=ap.parse_args()
 
@@ -622,9 +632,17 @@ def main():
     if u2_end_v is not None:
         print(f"[Kc 자동집계] 후기({late_start}~{late_end}, {n_end}일 실측): u2={u2_end_v:.3f} m/s, RHmin={rh_end_v:.1f}%")
 
+    irrig={}
+    if a.irrig:
+        irrig=load_irrigation_log(a.irrig)
+        d0=dt.datetime.strptime(start,"%Y%m%d").date(); d1=dt.datetime.strptime(end,"%Y%m%d").date()
+        inside={d:v for d,v in irrig.items() if d0<=d<=d1}
+        print(f"[관수 기록] {a.irrig}: {len(irrig)}일, 조회기간 안 {len(inside)}일, 합계 {sum(inside.values()):.1f} mm(공급)"
+              + (f" — 기간 밖 {len(irrig)-len(inside)}일은 쓰지 않음" if len(inside)<len(irrig) else ""))
+        irrig=inside
     p=dict(lat=lat,elev=elev,anem=anem,fetch=a.fetch,stn=stn,start=start,end=end,meta_source=meta_source,crop=crop,
            bud_date=bud_date,bud_date_manual=bud_date_manual,is_short_cycle=is_short_cycle,L_total=L_total_v,
-           u2_mid=u2_mid_v,rh_mid=rh_mid_v,u2_end=u2_end_v,rh_end=rh_end_v)
+           u2_mid=u2_mid_v,rh_mid=rh_mid_v,u2_end=u2_end_v,rh_end=rh_end_v,irrig=irrig)
     out=a.out if a.out!="eto_상세.xlsx" else f"output/eto({stn})_{crop_id}_{start}_{end}.xlsx"
     n,saved_path=build_workbook(rows,p,out)
     print(f"[완료] {saved_path}  ({n}일)  → 시트: 설정 / 원데이터 / 계산과정(수식) / 결과요약 / 물수지 / 계산근거")

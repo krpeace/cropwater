@@ -178,6 +178,89 @@ class TestWaterBalance:
         """Dr은 TAW를 초과할 수 없음"""
         assert min(self.TAW, self.TAW + 10.0) <= self.TAW
 
+    # ── fao56_core.wb_step: Ks 판단 시점(#15)·관수 I [식85·88] ──
+    def test_ks_from_previous_day_depletion(self):
+        """[#15] Ks는 전날 끝 고갈량 Dr,i-1로 정함: Dr 90에 비 40 → Ks = (120−90)/60 = 0.5 (비 뒤 고갈량 50으로 정하면 1.0)"""
+        from fao56_core import wb_step
+        ks, etc_adj, dp, dr = wb_step(90.0, 40.0, 5.0, self.TAW, self.RAW)
+        assert ks == pytest.approx(0.5)
+        assert etc_adj == pytest.approx(2.5)
+        assert dp == 0.0 and dr == pytest.approx(52.5)
+
+    def test_irrigation_reduces_depletion(self):
+        """관수 I(순량)는 비처럼 Dr을 줄임: Dr 70, 순관수 66.5, ETc 5 → Ks 0.8333, Dr = 70 − 66.5 + 4.1667"""
+        from fao56_core import wb_step
+        ks, etc_adj, dp, dr = wb_step(70.0, 0.0, 5.0, self.TAW, self.RAW, irr_net=66.5)
+        assert ks == pytest.approx(50 / 60)
+        assert dp == 0.0 and dr == pytest.approx(70 - 66.5 + 5 * 50 / 60)
+
+    def test_over_irrigation_percolates(self):
+        """[식88] 관수가 고갈량 + 당일 ETc보다 많으면 남는 양은 심층침투: DP = 40 − 5 − 20 = 15, Dr 0"""
+        from fao56_core import wb_step
+        ks, etc_adj, dp, dr = wb_step(20.0, 0.0, 5.0, self.TAW, self.RAW, irr_net=40.0)
+        assert dp == pytest.approx(15.0) and dr == 0.0
+
+    def test_wb_step_matches_compute_water_balance(self):
+        """cropwater_multi.compute_water_balance는 wb_step과 같은 값을 냄(무관수, Kc=1)"""
+        from fao56_core import wb_step
+        rain, eto = [0, 0, 30, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 12, 0], [5.0] * 17
+        r = self._wb(rain, eto)
+        dr = 0.0
+        for rec, p, e in zip(r, rain, eto):
+            ks, _, dp, dr = wb_step(dr, p, e, self.TAW, self.RAW)
+            assert rec["Dr"] == pytest.approx(round(dr, 2)) and rec["DP"] == pytest.approx(round(dp, 2))
+
+
+class TestIrrigationLog:
+    """fao56_core.load_irrigation_log — 관수 기록 CSV(날짜, 관수량_mm)"""
+
+    def test_formats_and_duplicates(self, tmp_path):
+        from fao56_core import load_irrigation_log
+        f = tmp_path / "irr.csv"
+        f.write_text("날짜,관수량_mm,메모\n2026-05-18,20,점적\n20260518,5,\n2026.06.01,12.5,\n2026/06/02,,빈 값\n", encoding="utf-8-sig")
+        log = load_irrigation_log(str(f))
+        assert log == {dt.date(2026, 5, 18): 25.0, dt.date(2026, 6, 1): 12.5}
+
+    def test_cp949_and_english_header(self, tmp_path):
+        from fao56_core import load_irrigation_log
+        f = tmp_path / "irr.csv"
+        f.write_bytes("date,amount_mm,메모\n2026-07-01,30,관수\n".encode("cp949"))
+        assert load_irrigation_log(str(f)) == {dt.date(2026, 7, 1): 30.0}
+
+    def test_bad_header_raises(self, tmp_path):
+        from fao56_core import load_irrigation_log
+        f = tmp_path / "irr.csv"
+        f.write_text("day,water\n2026-07-01,30\n", encoding="utf-8")
+        with pytest.raises(ValueError):
+            load_irrigation_log(str(f))
+
+    def test_negative_raises(self, tmp_path):
+        from fao56_core import load_irrigation_log
+        f = tmp_path / "irr.csv"
+        f.write_text("날짜,관수량_mm\n2026-07-01,-3\n", encoding="utf-8")
+        with pytest.raises(ValueError):
+            load_irrigation_log(str(f))
+
+
+class TestStationWaterBalanceSheet:
+    """cropwater_station.build_workbook 물수지 시트 수식: Ks는 Dr,i-1(G열), 관수량 I열 × Ea"""
+
+    def test_formulas(self, tmp_path):
+        import openpyxl
+        from cropwater_station import build_workbook
+        from fao56_core import load_crop_library
+        here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        crop = load_crop_library(os.path.join(here, "crops_library.csv"), os.path.join(here, "crops_overrides.csv"))["apple"]
+        rows = [dict(tm=dt.date(2026, 5, d), maxTa=25.0, minTa=12.0, avgTa=18.0, avgRhm=60.0, minRhm=35.0, avgWs=2.0,
+                     avgPv=12.0, avgTd=9.0, avgPa=1000.0, sumGsr=20.0, sumSsHr=8.0, sumLrgEv=4.0, sumRn=None) for d in (1, 2, 3)]
+        p = dict(lat=37.9, elev=77.7, anem=10.0, fetch=100.0, stn="101", start="20260501", end="20260503",
+                 meta_source="MANUAL", crop=crop, bud_date=dt.date(2026, 4, 1), irrig={dt.date(2026, 5, 2): 20.0})
+        _, path = build_workbook(rows, p, str(tmp_path / "wb.xlsx"))
+        ws = openpyxl.load_workbook(path)["물수지"]
+        assert ws["J3"].value.startswith("=IF(G3<=")          # Ks ← 전날 끝 고갈량
+        assert "I3*" in ws["H3"].value and "I3*" in ws["L3"].value
+        assert ws["I3"].value == 20.0 and ws["I2"].value == 0.0 and ws["I4"].value == 0.0
+
 
 # ════════════════════════════════════════════════════════════
 # 6. Kc 생육단계 보간 — kc_of_date()
