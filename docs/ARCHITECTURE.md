@@ -37,12 +37,17 @@ cropwater/
 │
 └── (02-Cycle) 단기예보 ETo·ETc 예측 — 7장
       ├── cropwater_fcst.py  ← CLI: calib·calib-sky(Rs 계수) / verify(H2 검증 엑셀) / errtable·wbverify·service(G4)
-      ├── fcst_archive.py    ← 과거 단기예보 CSV 파싱 → 발표별 일 입력(기대 강수 포함)
+      ├── fcst_archive.py    ← 과거 단기예보 CSV 파싱 → 발표별 일 입력(기대 강수 포함), 운영 서비스 표(직전 발표 대체)
       ├── rs_model.py        ← Rs 추정(S3 식50 + 강수유무, S4 + 강수확률·하늘상태), 계수 파일 2계층
       ├── obs_daily.py       ← 01-Cycle 워크북 → 관측 ETo·Kc
       ├── fcst_report.py     ← H2 검증 엑셀(라이브 수식)
       ├── fcst_wb.py         ← (G4) 관측·예보 물수지, 관수 필요 예상일·범위, 오차표, 서비스 전망
-      └── fcst_wb_report.py  ← (G4) 예보 물수지 검증 엑셀 / 서비스(관수 전망) 엑셀
+      ├── fcst_wb_report.py  ← (G4) 예보 물수지 검증 엑셀 / 서비스(관수 전망) 엑셀
+      ├── cropwater_ops.py   ← (G5) 운영 CLI: run(02:10·17:10 수집 → 관수 전망 엑셀) / probe-asos / report(H3) / grid
+      ├── kma_fcst.py        ← (G5) 단기예보·ASOS API 조회, 완결성 점검, 원자료 보관, 수집 로그
+      ├── kma_grid.py        ← (G5) 위경도 ↔ 단기예보 격자(LCC)
+      ├── ops_report.py      ← (G5) H3 보고서 엑셀
+      └── ops_replay.py      ← (G5) 모의 API·가짜 시계로 운영 경로 재생(오프라인 검증)
 ```
 
 **의존 관계** — 실행 파일은 서로 독립적이며 `fao56_core`를 공유합니다. 02-Cycle 모듈은 01-Cycle 출력 워크북(관측 기준값)을 입력으로 씁니다.
@@ -377,7 +382,8 @@ FAO-56 식(85)의 `I` 항에 농가가 준 관수량을 넣습니다. 비어 있
 | `fcst_report.py` | H2 검증 엑셀 (라이브 수식). 일별비교 열 배치는 `daily_layout()`이 정하고 다른 시트는 열 키로 참조. 하늘상태가 있으면 SKY계수 시트·S4 열·방법 비교 표 추가 | 3 | 구현 |
 | `fcst_wb.py` | (G4) 관측 물수지(`observed_wb`: 관수 기록·관수 규칙 시나리오·결측일은 그날 아침 D+0 예보로 채움), 발표별 예보 물수지(`forecast_runs`: 아침 출발 = 관측 Dr(D−1), 저녁 = + 오늘 아침 D+0 예보, 경로 중심·빠르면·늦으면 + 비교 경로·참값), 지표(`wb_lead_metrics`, `need_contingency`, `first_need_eval`, `threshold_sensitivity`, `rain_verification`), 오차표(`eto_error_rows`·`save_error_table`·`pooled_errors`·`err_lookup`), 편향 보정 자리(`apply_bias`, 기본 없음 — #10), 한 발표의 전망(`service_outlook`) | 4 | 구현 |
 | `fcst_wb_report.py` + `fcst_error_table.csv` | (G4) 예보 물수지 검증 엑셀(7시트, 라이브 수식) / 서비스 엑셀(관수 전망 7시트). 오차표는 지점 × 해 × 발표 × 선행일 × 월 행(일·3일 누적) — 서비스는 여러 해를 표본 수로 가중해 합치고, 검증은 검증 연도를 뺀 다른 해 행을 씀. 지점 행이 없으면 stn 0(기본값) 행, 그것도 없으면 전 지점을 합침 | 4 | 구현 |
-| `kma_fcst.py` + `kma_grid.py` | 운영용 API 수집(02:10·17:10, 페이징, 원자료 보관, 실패 시 직전 발표 사용), 위경도 → 격자 변환 | 5 | 예정 |
+| `kma_fcst.py` + `kma_grid.py` | 운영용 API 조회(단기예보 페이지 나눔, ASOS 일자료), 응답 코드 분류, 완결성 점검(발표시각별 행 수), 원자료 gzip 보관, 완결 발표만 OpenAPI 형식 월별 CSV로 쌓기, 관측 캐시, 수집 로그. 위경도 → 격자 변환 | 5 | 구현 |
+| `cropwater_ops.py` + `ops_report.py` + `ops_replay.py` | 운영 CLI(아래 ◇ 운영 수집기). 슬롯마다 재시도·마감·지난 발표 채움·관측 조회 → 운영 결측 규칙(#12)으로 관수 전망 엑셀 → 슬롯 로그. H3 보고서, 모의 재생 | 5 | 구현 |
 
 **실행**
 
@@ -534,7 +540,7 @@ rs_coef.csv ─────→ rs_model.load_coef()   ──┘   예보 ETo(S3�
   - 2026년 4~9월(73_134) 확인: 결측값은 7/14 11시~7/15 08시, 8/29 11시~8/30 08시 발표에 몰려 있습니다(발표 전체가 비어 있음).
   - **검증 규칙:** 필수 6요소 중 하나라도 없는 서비스 발표는 통째로 뺍니다(다른 발표로 대신하지 않음). 주 방법이 S4면 하늘상태가 없는 행, 그리고 대상일 관측이 없는 행도 뺍니다. 뺀 발표·행은 요약 시트 '제외' 행에 구간과 사유로 표시합니다.
   - 선택 요소(SKY·POP)는 완전 발표 판정에 쓰지 않습니다. 서비스 발표 자체에 SKY가 없으면 이전 발표로 채우지 않고 비워 둡니다.
-  - **운영 규칙(G5, 예정):** 발표를 받지 못하면 직전 발표로 대신하고, 하늘상태가 없으면 S3로 계산합니다. 검증 규칙과 다릅니다.
+  - **운영 규칙(G5, #12):** 서비스 발표를 마감까지 받지 못하면 24시간 안의 직전 발표로 대신하고(`fcst_archive.ops_service_table`), 하늘상태·강수확률이 없으면 S3로 계산합니다(`forecast_table(s3_fallback=True)`). 전날 ASOS 관측이 아직 없으면 전날을 예보 하루로 범위를 담아 진행합니다(`fcst_wb.service_outlook(obs_last=…)`). 검증 규칙과 다릅니다(아래 ◇ 운영 수집기).
 - **요소 판별:** 파일명 키워드가 우선입니다. 없으면 값 분포로 판별합니다(업로드 과정에서 한글 파일명이 '_'로 바뀌는 경우).
   - 강수: 최솟값 0이고 중앙값 0 (장마철에는 0 비율이 70%대까지 내려가 '0 비율 > 80%' 규칙은 기온으로 잘못 판별함)
   - 하늘상태(SKY): 값이 코드 1·3·4 (드물게 잘못된 0 포함)
@@ -594,6 +600,112 @@ rs_coef.csv ─────→ rs_model.load_coef()   ──┘   예보 ETo(S3�
   - 일시는 KST, 값 표기는 OpenAPI 응답과 같습니다(강수 문자열, lead +1부터, 연장기간 코드). 먼저 받은 OpenAPI 파일과 겹치는 4/1~6/4 구간의 값이 100% 같았습니다.
   - TMX는 예보시각 15시, TMN은 06시 칸만 있습니다(대상일 = 예보일).
   - 2025년 4/1 02시 ~ 9/30 23시 발표 1,464회(183일 × 8회), 발표당 행 수 모두 정상(일부만 있는 발표 없음), 결측값 없음
+
+
+### ◇ 운영 수집기 (G5, 2026-09-30 구현)
+
+예보를 하루 두 번 받아 관수 전망 엑셀을 자동으로 만듭니다. 근거는 [THEORY.md 9장 ◆ 운영 수집 — H3](THEORY.md#9-예보-기반-etoetc--기상청-단기예보), 판정은 [VALIDATION.md](VALIDATION.md) G5입니다.
+
+**실행** — 스케줄러가 부릅니다(아래 등록 방법).
+
+```bash
+# 준비: apikey.txt(DATA_GO_KR), ops_config.json(ops_config.example.json을 복사해 고침)
+python cropwater_ops.py run --config ops_config.json                          # 02:10·17:10 — 지금 시각의 슬롯
+python cropwater_ops.py run --config ops_config.json --slot "2026-10-01 02"   # 특정 슬롯 다시(마감 뒤면 지연 수집)
+python cropwater_ops.py run --config ops_config.json --no-wait                # 한 번만 시도(설치 확인용)
+python cropwater_ops.py probe-asos --config ops_config.json                   # 전날 ASOS 일자료 조회 가능 시각 점검(매시)
+python cropwater_ops.py report --config ops_config.json --since 2026-10-01    # H3 보고서 엑셀
+python cropwater_ops.py grid 37.90262 127.73570                               # 농장 좌표 → 격자 73_134
+python ops_replay.py --fcst data/fcst_101_2026 --obs output/eto101_apple_20260101_20260928.xlsx \
+       --start 2026-06-01 --end 2026-06-30 --data data/replay --faults faults.json   # 오프라인 모의 재생
+```
+
+- `run`은 슬롯 결과가 '실패'면 종료 코드 2를 돌려줍니다(스케줄러 기록에서 보임).
+
+**설정 (ops_config.json)**
+
+| 키 | 뜻 | 기본 |
+| :--- | :--- | :--- |
+| `stn` | ASOS 지점(관측·계수·오차표) | 101 |
+| `grid` | 예보 격자 `nx_ny`. 없으면 `lat`·`lon`(농장 좌표)으로 계산, 그것도 없으면 대표 지점 표 | 지점 표 |
+| `lat`, `lon` | 농장 좌표(격자 계산용) | — |
+| `obs` | 01-Cycle 관측 워크북(설정 시트의 Kc·토양, 원데이터의 관측 이력) | 필수 |
+| `data` / `out` | 운영 자료 폴더 / 관수 전망 엑셀 폴더 | `data/ops` / `output/service` |
+| `apikey` | 인증키 파일 | `apikey.txt` |
+| `coef` / `s4_coef` / `err` | S3 계수 / S4 운영 계수 / 오차표 | `rs_coef.csv` / `rs_sky_coef.csv` / `fcst_error_table.csv` |
+| `irrig` | 관수 기록 CSV | 없음 |
+| `history` | 함께 읽을 과거 예보 폴더(운영 첫날부터 편향 점검 30일을 채우고 싶을 때) | 없음 |
+| `window_days` | 계산에 읽는 최근 예보 기간(일) | 40 |
+
+**한 슬롯의 처리 (`run`)**
+
+```
+02:10 (또는 17:10) ─→ Collector.collect_service()
+   ├─ 서비스 발표(02·17시) 요청: +0·+5·+10·+15·+20·+30분 (마감 = 발표 + 40분)
+   │    fetch_vilage() → 원자료 gzip → check_issue()(발표시각별 행 수) → 필수 6요소가 차면 store_issue()
+   │    응답 00 정상 / 03 자료 없음 → 다시 / 서버 오류·시간 초과 → 다시 / 10~33·HTTP 401·403 → 멈춤(인증·요청 오류)
+   ├─ 첫 시도 뒤 catch_up(): 지난 24시간 안에 아직 받지 않은 발표를 한 번씩(직전 발표 = 백업, 02시 발표의 00~02시 채움)
+   ├─ update_obs(): ASOS 전날(D−1) 조회(asos_d1 기록) + 워크북 뒤 최근 30일의 빠진 날 → 관측 캐시
+   ▼
+build_service()
+   ops_prepare()  최근 window_days일의 받은 발표 → ops_service_table()(서비스 발표가 없으면 직전 발표: src_lead·err_name)
+                  → forecast_table(S4 운영 계수 고정, src_lead로 계수 선택, s3_fallback)      ← 관측 = 워크북 + 캐시
+   fcst_wb.service_from()  관측 물수지(관수 기록) → 관측이 아직 없는 최근 날은 예보 하루로 범위 포함(obs_last)
+                           → service_outlook() → build_service_workbook()(수집 정보 표시)
+   ▼
+slot_log.csv   결과: 정시 성공 / 백업: S3 / 백업: 직전 발표 (S3) / 지연 수집 / 다시 만듦 / 실패
+```
+
+**운영 결측 규칙 구현 (#12)**
+
+| 상황 | 구현 | 서비스 엑셀 표시 |
+| :--- | :--- | :--- |
+| 서비스 발표를 마감까지 못 받음 | `fcst_archive.ops_service_table`: 24시간 안의 가장 최근 발표(필수 6요소). `daily_inputs(arch, 대체 발표, 서비스 대상일)`. `src_lead`(대체 발표 날짜 기준 선행일) → S4 계수, `err_name`·`err_lead`(02~14시 발표 → 아침, 17~23시 → 저녁) → ± 오차 r. 대체 발표가 담지 못한 마지막 날(참고)은 뺌 | 머리 ※ 줄, 수집 정보 '예보 발표' |
+| 하늘상태·강수확률 없음 | 저장할 때 두 요소를 빼고, `forecast_table(s3_fallback=True)`가 그 행을 S3로(`rs_method`) | '일사 추정' |
+| 전날 ASOS 관측 없음 | '관측 물수지'는 전날을 예보로 채워 보이고(관수 기록 칸 유지), 전망은 관측 마지막 날 끝 Dr에서 출발해 전날을 예보 하루로 진행(`service_outlook(obs_last=…)`: 세 경로 범위, 관측 강수·관수 기록 반영) | '예보 물수지'의 '관측 전' 행, '어제 관측' |
+| 24시간 안에 쓸 발표가 없음 | 엑셀을 만들지 않고 '실패' | — |
+
+**자료 폴더 (`data/ops`, 저장소에 올리지 않음)**
+
+```
+raw/fcst/73_134/2026/10/20261001_0200__20261001T021003_p1.json.gz   응답 본문 그대로(시도마다, 받은 시각 포함)
+raw/asos/101/2026/09/20260930_20260930__20261001T021012.json.gz
+fcst/73_134/vilage_73_134_202610.csv   완결 발표만, OpenAPI 형식(fcst_archive가 그대로 읽음). 하늘상태·강수확률이 덜 찼으면 두 요소는 뺌
+fcst/73_134/issues.csv                 받은 발표 목록(발표, 받은 시각, 8요소 완결, 행 수)
+obs/asos_101_daily.csv                  ASOS 일자료(날짜마다 가장 최근 조회 값). 워크북에 없는 날짜만 계산에 씀
+log/collect_log.csv                     시도마다: 시각, 슬롯, 종류(fcst·asos_d1·asos_fill·asos_probe), 대상, HTTP·응답 코드, 행 수, 상태, 완결 여부
+log/slot_log.csv                        슬롯마다: 시작·끝, 받은 시각, 정시 여부, 결과, 계산한 발표, Rs 방법, 전날 관측, 엑셀, 오류
+```
+
+**스케줄러 등록**
+
+Windows(명령 프롬프트, 저장소 폴더가 `C:\cropwater`일 때):
+
+```bat
+schtasks /Create /TN cropwater_morning /SC DAILY /ST 02:10 /TR "cmd /c cd /d C:\cropwater && python cropwater_ops.py run --config ops_config.json >> data\ops\run.log 2>&1"
+schtasks /Create /TN cropwater_evening /SC DAILY /ST 17:10 /TR "cmd /c cd /d C:\cropwater && python cropwater_ops.py run --config ops_config.json >> data\ops\run.log 2>&1"
+schtasks /Create /TN cropwater_probe /SC HOURLY /ST 00:40 /TR "cmd /c cd /d C:\cropwater && python cropwater_ops.py probe-asos --config ops_config.json >> data\ops\probe.log 2>&1"
+```
+
+- 작업 스케줄러의 작업 속성에서 '작업을 실행하기 위해 절전 모드 해제'와 '예약된 시작 시간을 놓친 경우 가능한 대로 빨리 작업 시작'을 켭니다. 컴퓨터가 꺼져 있었던 슬롯은 '실행 안 됨'(실패)으로 셉니다.
+- 관측 점검(`cropwater_probe`)은 조회 가능 시각을 알 때까지 1~2주만 돌리고 지웁니다(`schtasks /Delete /TN cropwater_probe`).
+
+Linux(cron):
+
+```cron
+CRON_TZ=Asia/Seoul
+10 2 * * *  cd /opt/cropwater && python3 cropwater_ops.py run --config ops_config.json >> data/ops/run.log 2>&1
+10 17 * * * cd /opt/cropwater && python3 cropwater_ops.py run --config ops_config.json >> data/ops/run.log 2>&1
+40 * * * *  cd /opt/cropwater && python3 cropwater_ops.py probe-asos --config ops_config.json >> data/ops/probe.log 2>&1
+```
+
+- 프로그램은 컴퓨터 시간대와 관계없이 UTC + 9시간으로 KST를 계산합니다(한국은 서머타임 없음).
+- **국내 인터넷에서 실행합니다.** 공공데이터포털은 해외 접속이 불안정할 수 있습니다(클라우드 작업 공간에서는 접속이 차단됨, 2026-09-30 확인).
+
+**모의 재생 (`ops_replay.py`)** — 과거 예보(OpenAPI CSV)와 01-Cycle 워크북으로 API를 흉내 내고, 가짜 시계로 슬롯을 차례로 처리합니다(네트워크 없이 수집기 논리 검정).
+- 장애 주입 JSON: `delay_min`(제공 지연, 분), `missing`(끝내 제공 안 함), `truncate`(잘린 응답 횟수), `drop_opt`(하늘상태·강수확률 없이 제공), `fatal`(인증 오류 시각 범위), `p_http500`·`p_timeout`(요청마다 확률), `seed`
+- `--obs-until`: 워크북을 그 날짜까지만 쓰고 뒤는 모의 ASOS로 받아 관측 경로도 검정. `--asos-hour`: 전날 자료가 제공되는 시각
+- `--mode light`(기본)는 수집과 출처 판단만 해서 빠릅니다. `full`은 슬롯마다 관수 전망 엑셀을 만듭니다.
 
 ---
 

@@ -469,6 +469,10 @@ def build_service_workbook(sv, out):
     _settings(wb, soil, [], W, f"관수 전망 — ASOS {sv['stn']} {sv.get('stn_name', '')} · {ol['run']:%Y-%m-%d %H시} {ol['run_name']} 발표")
     ws_owb, owb_dates, owb_dr, owb_last = sheet_owb(wb, sv["owb"], W, name="관측 물수지",
                                                     note="노란 칸(관수 기록)에 준 관수량(공급 mm, 10a당 1톤 = 1 mm)을 적으면 어제 끝 Dr과 전망이 다시 계산됩니다")
+    # 출발 = 관측 마지막 날 끝 Dr (보통 어제. 어제 관측이 아직 없으면 그 전날 — 어제는 '예보 물수지'에서 예보 하루로 진행)
+    dates = [pd.Timestamp(x) for x in sv["owb"].date]
+    W["_owb_row"] = {x: i + 2 for i, x in enumerate(dates)}
+    owb_last = W["_owb_row"].get(pd.Timestamp(ol["prev"]), owb_last)
     fr = _sheet_service_wb(wb, sv, W, owb_last)
     sheet_errtab(wb, dict(err=sv["err"], err_path=sv.get("err_path"), year=None))
     _sheet_bias(wb, sv)
@@ -486,35 +490,46 @@ def _sheet_service_wb(wb, sv, W, owb_last):
              "강수확률 (최대)", "기대 강수 (mm)", "Dr 중심 (mm)", "Dr 빠르면 (mm)", "Dr 늦으면 (mm)", "상태 (중심)"]
     for c, h in enumerate(heads, 1):
         H(ws, 1, c, h, GREEN if c <= 3 else (BLUE if c <= 11 else BROWN))
-    C(ws, 2, 1, "출발"); C(ws, 2, 2, _v(ol["prev"]), DATE); C(ws, 2, 3, "D−1 끝 (관측 물수지)")
+    D = pd.Timestamp(ol["run"]).normalize()
+    lagged = bool(ol.get("lag_days"))
+    C(ws, 2, 1, "출발"); C(ws, 2, 2, _v(ol["prev"]), DATE)
+    C(ws, 2, 3, "관측 마지막 날 끝 (관측 물수지)" if lagged else "D−1 끝 (관측 물수지)")
     for c in (12, 13, 14):
         C(ws, 2, c, f"='관측 물수지'!M{owb_last}", F1, bold=True)
     r = 3
     rows = []
     for p in ol["pre"]:
-        rows.append(dict(kind="그날", date=p["date"], lead=0, ETo=p["ETo"], Kc=p["Kc"], err=None, rel=p["rel"], rain=p["rain"],
-                         pop=p.get("pop_max"), rain_exp=p["rain_exp"]))
+        k = p.get("kind", "today")
+        irr_row = W.get("_owb_row", {}).get(pd.Timestamp(p["date"])) if k == "lag" else None
+        rows.append(dict(kind="관측 전" if k == "lag" else "그날", date=p["date"], lead=0 if k != "lag" else -(D - pd.Timestamp(p["date"])).days,
+                         ETo=p["ETo"], Kc=p["Kc"], err=None, rel=p["rel"], rain=p["rain"], pop=p.get("pop_max"),
+                         rain_exp=p["rain_exp"], irr=(f"'관측 물수지'!H{irr_row}" if irr_row else None),
+                         known=p.get("rain_known", False)))
     for x in ol["days"].itertuples():
         rows.append(dict(kind="주" if x.main else "참고", date=x.target, lead=int(x.lead_day), ETo=x.ETo_main, Kc=x.Kc,
                          err=x.etc_err, rel=x.rel, rain=x.rain, pop=getattr(x, "pop_max", np.nan),
                          rain_exp=(x.rain_exp if not pd.isna(getattr(x, "rain_exp", np.nan)) else x.rain)))
-    info = dict(first=r, main=[], ref=None, pre=None)
+    info = dict(first=r, main=[], ref=None, pre=None, pres=[])
     for z in rows:
-        grey = z["kind"] in ("참고", "그날")
+        grey = z["kind"] in ("참고", "그날", "관측 전")
         clr = GREY if grey else "1A1A1A"
         fill = REF_FILL if grey else None
-        C(ws, r, 1, "참고 (마지막 날)" if z["kind"] == "참고" else ("그날 (아침 D+0 예보)" if z["kind"] == "그날" else "주 지표"),
-          color=clr, fill=fill)
-        C(ws, r, 2, _v(z["date"]), DATE, color=clr, fill=fill); C(ws, r, 3, f"D+{z['lead']}", color=clr, fill=fill)
+        label = {"참고": "참고 (마지막 날)", "그날": "그날 (아침 D+0 예보)",
+                 "관측 전": "관측 전 (그날 아침 D+0 예보" + (", 관측 강수)" if z.get("known") else ")")}.get(z["kind"], "주 지표")
+        C(ws, r, 1, label, color=clr, fill=fill)
+        lead_txt = f"D+{z['lead']}" if z["lead"] >= 0 else f"D−{-z['lead']}"
+        C(ws, r, 2, _v(z["date"]), DATE, color=clr, fill=fill); C(ws, r, 3, lead_txt, color=clr, fill=fill)
         C(ws, r, 4, _v(z["ETo"]), F2, color=clr, fill=fill); C(ws, r, 5, _v(z["Kc"]), "0.000", color=clr, fill=fill)
         C(ws, r, 6, f"=D{r}*E{r}", F2, color=clr, fill=fill)
         C(ws, r, 7, f"=F{r}*H{r}" if z["kind"] != "그날" else None, F2, color=clr, fill=fill)
         C(ws, r, 8, _v(z["rel"]), "0%", color=clr, fill=fill)
         C(ws, r, 9, _v(z["rain"]), F1, color=clr, fill=fill); C(ws, r, 10, _v(z["pop"]), "0%", color=clr, fill=fill)
         C(ws, r, 11, _v(z["rain_exp"]), F1, color=clr, fill=fill)
-        C(ws, r, 12, _wb_formula(f"L{r - 1}", f"K{r}", f"F{r}", W), F1, bold=not grey, color=clr, fill=fill)
-        C(ws, r, 13, _wb_formula(f"M{r - 1}", None, f"F{r}*(1+H{r})", W), F1, color=clr, fill=fill)
-        C(ws, r, 14, _wb_formula(f"N{r - 1}", f"I{r}", f"F{r}*MAX(1-H{r},0)", W), F1, color=clr, fill=fill)
+        irr = z.get("irr")                    # 관측 전 날: 관측 물수지 노란 칸(관수 기록)의 순관수량도 모든 경로에 넣음
+        early_p = f"K{r}" if z.get("known") else None     # 관측 강수를 아는 날은 '빠르면'도 그 강수
+        C(ws, r, 12, _wb_formula(f"L{r - 1}", f"K{r}", f"F{r}", W, irr), F1, bold=not grey, color=clr, fill=fill)
+        C(ws, r, 13, _wb_formula(f"M{r - 1}", early_p, f"F{r}*(1+H{r})", W, irr), F1, color=clr, fill=fill)
+        C(ws, r, 14, _wb_formula(f"N{r - 1}", f"I{r}", f"F{r}*MAX(1-H{r},0)", W, irr), F1, color=clr, fill=fill)
         C(ws, r, 15, f'=IF(L{r}>={W["RAW"]},"관수 필요",IF(L{r}>={W["RAW"]}*0.5,"주의","안전"))', color=clr, fill=fill)
         if z["kind"] == "주":
             info["main"].append(r)
@@ -522,6 +537,7 @@ def _sheet_service_wb(wb, sv, W, owb_last):
             info["ref"] = r
         else:
             info["pre"] = r
+            info["pres"].append((r, z["kind"], pd.Timestamp(z["date"])))
         r += 1
     info["last"] = r - 1
     r += 1
@@ -553,20 +569,33 @@ def _service_main(ws, sv, W, fr, owb_last):
     ol, soil = sv["outlook"], sv["soil"]
     rn, run = ol["run_name"], ol["run"]
     T(ws, 1, 1, f"관수 전망 — {sv.get('stn_name', '')}(ASOS {sv['stn']}) · 사과 · {run:%Y-%m-%d %H시} {rn} 발표", size=14, bold=True, color=GREEN)
-    T(ws, 2, 1, f"격자 {sv.get('grid', '')} 단기예보 + ASOS 관측(어제까지) · 예보 ETo 주 방법 {sv.get('main', 'S4')} · 편향 보정 없음 · "
+    ops = sv.get("ops")
+    method = (ops or {}).get("rs_method") or sv.get("main", "S4")
+    T(ws, 2, 1, f"격자 {sv.get('grid', '')} 단기예보 + ASOS 관측(어제까지) · 예보 ETo 주 방법 {method} · 편향 보정 없음 · "
                 f"대상일 {'오늘~D+3' if rn == '아침' else '내일~D+4'} (마지막 날은 참고)", size=9, color="555555")
+    if ops and (ops.get("backup") or "S3" in (ops.get("rs_method") or "") or ops.get("obs_prev") != "관측"):
+        T(ws, 3, 1, "※ " + " · ".join(ops_flags(ops, rn)), size=9, bold=True, color="A8681B")
     r = 4
     _sec(ws, r, "지금 토양 상태", 8); r += 1
-    items = [("어제 끝 고갈량 Dr (관측 물수지)", f"='관측 물수지'!M{owb_last}", F1, "mm"),
+    prev = pd.Timestamp(ol["prev"])
+    lab0 = ("어제 끝 고갈량 Dr (관측 물수지)" if not ol.get("lag_days") else f"관측 마지막 날({prev:%m/%d}) 끝 고갈량 Dr")
+    items = [(lab0, f"='관측 물수지'!M{owb_last}", F1, "mm"),
              ("RAW (이만큼 빠지면 관수)", f"={W['RAW']}", F1, "mm"),
              ("RAW 대비", f"=B{r}/B{r + 1}", "0%", ""),
              ("상태", f'=IF(B{r}>=B{r + 1},"관수 필요",IF(B{r}>=0.5*B{r + 1},"주의","안전"))', None, "")]
     for k, f, fmt, unit in items:
         H(ws, r, 1, k, LIGHT, white=False); C(ws, r, 2, f, fmt, bold=True); T(ws, r, 3, unit, size=9, color="555555")
         r += 1
-    if fr["pre"]:
-        H(ws, r, 1, "오늘 끝 예상 Dr (아침 D+0 예보)", LIGHT, white=False)
-        C(ws, r, 2, f"='예보 물수지'!L{fr['pre']}", F1, bold=True); T(ws, r, 3, "mm (저녁 발표의 출발)", size=9, color="555555")
+    for rr, kind, day in fr.get("pres", []):
+        D = pd.Timestamp(run).normalize()
+        if kind == "관측 전":
+            nm = "어제" if day == D - pd.Timedelta(days=1) else f"{day:%m/%d}"
+            H(ws, r, 1, f"{nm} 끝 예상 Dr (관측 전 — 아침 예보)", LIGHT, white=False)
+            note = "mm (ASOS 관측이 아직 없어 예보 하루로 진행, 범위 포함)"
+        else:
+            H(ws, r, 1, "오늘 끝 예상 Dr (아침 D+0 예보)", LIGHT, white=False)
+            note = "mm (저녁 발표의 출발)"
+        C(ws, r, 2, f"='예보 물수지'!L{rr}", F1, bold=True); T(ws, r, 3, note, size=9, color="555555")
         r += 1
     r += 1
     _sec(ws, r, "★ 앞으로 3일 — 주 지표", 8); r += 1
@@ -608,12 +637,14 @@ def _service_main(ws, sv, W, fr, owb_last):
     for c, h in enumerate(hd, 1):
         H(ws, r, c, h)
     r += 1
-    for rr in ([fr["pre"]] if fr["pre"] else []) + fr["main"] + ([fr["ref"]] if fr["ref"] else []):
-        grey = rr == fr["ref"] or rr == fr["pre"]
+    pre_kind = {rr: k for rr, k, _ in fr.get("pres", [])}
+    for rr in [x for x, _, _ in fr.get("pres", [])] + fr["main"] + ([fr["ref"]] if fr["ref"] else []):
+        grey = rr == fr["ref"] or rr in pre_kind
         clr, fill = (GREY, REF_FILL) if grey else ("1A1A1A", None)
         src = lambda c: f"='예보 물수지'!{c}{rr}"
         C(ws, r, 1, src("B"), DATE, color=clr, fill=fill); C(ws, r, 2, src("C"), color=clr, fill=fill)
-        C(ws, r, 3, "참고" if rr == fr["ref"] else ("오늘(예보)" if rr == fr["pre"] else "주 지표"), color=clr, fill=fill)
+        C(ws, r, 3, "참고" if rr == fr["ref"] else ({"관측 전": "관측 전(예보)", "그날": "오늘(예보)"}.get(pre_kind.get(rr), "주 지표")),
+          color=clr, fill=fill)
         C(ws, r, 4, src("D"), F2, color=clr, fill=fill); C(ws, r, 5, src("E"), "0.00", color=clr, fill=fill)
         C(ws, r, 6, src("F"), F1, color=clr, fill=fill, bold=not grey)
         C(ws, r, 7, f"=IF('예보 물수지'!G{rr}=\"\",\"\",'예보 물수지'!G{rr})", F1, color=clr, fill=fill)
@@ -624,6 +655,21 @@ def _service_main(ws, sv, W, fr, owb_last):
         C(ws, r, 13, src("O"), color=clr, fill=fill)
         r += 1
     r += 1
+    if ops:
+        _sec(ws, r, "수집 정보 (운영 수집기, THEORY 9장 ◆ 운영 수집)", 8); r += 1
+        src = pd.Timestamp(ops["src_run"])
+        info = [("예보 발표", f"{src:%Y-%m-%d %H}시 발표" + (" — 서비스 발표를 마감까지 받지 못해 직전 발표로 대신(#12)" if ops.get("backup") else " (서비스 발표)")),
+                ("일사 추정", {"S4": "S4 (하늘상태·강수확률 포함)", "S3": "S3 (하늘상태·강수확률 없음 — 식50 + 강수유무, #12)"}.get(
+                    ops.get("rs_method"), f"{ops.get('rs_method')} (날마다 다름: '예보 물수지' 참고)")),
+                ("어제 관측", "ASOS 관측" if ops.get("obs_prev") == "관측" else
+                 "아직 조회되지 않음 → 어제를 어제 아침 발표 D+0 예보로 먼저 진행(세 경로 범위 포함, #12). '관측 물수지'에는 예보로 채워 보임"),
+                ("대상일", f"{ops.get('n_days')}일" + (" (대체 발표가 마지막 날을 담지 않음)" if ops.get("dropped") else "")),
+                ("만든 시각", f"{pd.Timestamp(ops['made_at']):%Y-%m-%d %H:%M}" if ops.get("made_at") is not None else "")]
+        for k, v in info:
+            H(ws, r, 1, k, LIGHT, white=False); C(ws, r, 2, v, left=True)
+            ws.merge_cells(start_row=r, start_column=2, end_row=r, end_column=8)
+            r += 1
+        r += 1
     notes = ["읽는 법: 고갈량 Dr은 포장용수량에서 빠진 물(mm)입니다. Dr이 RAW에 닿으면 관수가 필요합니다. 예상 Dr은 '관수하지 않을 때'의 값입니다.",
              "3일 합(주 지표)이 하루 값보다 믿을 만합니다(FAO-56 권고: 추정 일사로 계산한 ETo는 여러 날 합계로 쓰기). 마지막 날은 참고로만 보세요.",
              "범위: 빠르면 = 예보 비가 오지 않고 증발산이 예보보다 많을 때, 늦으면 = 예보 비가 모두 오고 증발산이 적을 때. 두 해 검증에서 실제 날짜가 '빠르면'보다 앞선 적은 없었습니다.",
@@ -633,6 +679,18 @@ def _service_main(ws, sv, W, fr, owb_last):
         r = _note(ws, r, n_, width=150)
     widths(ws, {"A": 34, "B": 12, "C": 14, "D": 10, "E": 7, "F": 10, "G": 10, "H": 12, "I": 9, "J": 12, "K": 14, "L": 20, "M": 11})
     ws.sheet_view.showGridLines = False
+
+
+def ops_flags(ops, run_name):
+    """서비스 엑셀 머리의 운영 표시(직전 발표 대체·S3·전날 관측 채움)"""
+    out = []
+    if ops.get("backup"):
+        out.append(f"{'02' if run_name == '아침' else '17'}시 발표를 받지 못해 {pd.Timestamp(ops['src_run']):%m-%d %H}시 발표로 계산")
+    if "S3" in (ops.get("rs_method") or ""):
+        out.append("하늘상태·강수확률 없음 → 일사 S3")
+    if ops.get("obs_prev") != "관측":
+        out.append("어제 ASOS 관측이 아직 없어 어제를 아침 예보로 진행(범위 포함)")
+    return out
 
 
 def _sheet_bias(wb, sv):
@@ -686,6 +744,9 @@ def _method_service(wb, sv):
            ("주 지표", "처음 3일(아침 오늘~D+2, 저녁 내일~D+3) 합계. 마지막 날(아침 D+3·저녁 D+4)은 참고(#18)"),
            ("검증", "2025·2026년 과거 단기예보로 검증(VALIDATION G4): 예보 물수지 오차의 대부분은 강수 예보에서 오며, 범위(빠르면~늦으면)가 실제 관수 필요일을 대부분 포함"),
            ("한계", "예보 강수량은 관측보다 많게 나오는 경향이 있습니다(특히 장마철). 비 예보가 있으면 '빠르면'도 함께 보세요. 한 지점(춘천)·두 해 검증 결과입니다"),
+           ("운영 규칙", "서비스 발표를 마감(발표 + 40분)까지 못 받으면 24시간 안의 직전 발표로 계산(그 발표 기준 선행일의 S4 계수·오차 r). "
+                      "하늘상태·강수확률이 없으면 S3. 어제 ASOS 관측이 아직 없으면 어제를 어제 아침 발표 D+0 예보로 먼저 진행하고, "
+                      "저녁 발표의 '그날'처럼 범위(빠르면·늦으면)에 그날의 불확실성을 담음(#12, VALIDATION G5)"),
            ("근거 문서", "docs/THEORY.md 6·9장, docs/VALIDATION.md G4, docs/RESULTS_GUIDE.md")]
     for i, (k, v, *hd) in enumerate(doc, 1):
         head = bool(hd and hd[0])

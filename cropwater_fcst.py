@@ -160,11 +160,15 @@ def s4_is_fixed(df):
     return "s4_fold" in df and len(df) > 0 and bool((df["s4_fold"] == S4_FIXED).all())
 
 
-def forecast_table(st, obs, lat, elev, coef, kp, s4_fixed=None):
+def forecast_table(st, obs, lat, elev, coef, kp, s4_fixed=None, s3_fallback=False):
     """서비스 표(fcst_archive.service_table) + 관측 → 예보 ETo(S4·S3·S1), 관측·기준선, Kc·ETc.
        주 방법(★): 하늘상태가 있으면 S4, 없으면 S3 → 열 Rs_main·ETo_main·ETc_main.
        S4 계수: s4_fixed(load_s4_fixed 결과)가 있으면 그 계수를 선행일별로 고정 적용(다른 해 독립 검증),
-       없으면 월 단위 교차검증. 계수표는 df.attrs["s4_table"], 행별 묶음은 s4_fold 열(대상월 또는 '고정')."""
+       없으면 월 단위 교차검증. 계수표는 df.attrs["s4_table"], 행별 묶음은 s4_fold 열(대상월 또는 '고정').
+       운영(G5):
+         - 서비스 표에 src_lead 열(직전 발표로 대신한 행의 '대체 발표 기준 선행일', ops_service_table)이 있으면
+           고정 S4 계수를 그 선행일로 고른다(없으면 lead_day — 검증과 같음)
+         - s3_fallback=True면 S4를 계산할 수 없는 행(하늘상태·강수확률 없음)의 주 방법을 S3로 채운다(#12). 열 rs_method = S4/S3"""
     df = st.copy()
     df["target"] = pd.to_datetime(df["target"])
     df["run_date"] = df["run"].dt.normalize()
@@ -190,8 +194,9 @@ def forecast_table(st, obs, lat, elev, coef, kp, s4_fixed=None):
             df["s4_fold"] = month_folds(df.target).values
         else:
             m = s4_fixed.set_index("lead_day")
+            klead = df["src_lead"] if "src_lead" in df else df["lead_day"]
             co = np.array([m.loc[k, list(S4_NAMES)].to_numpy(float) if k in m.index else np.full(len(S4_NAMES), np.nan)
-                           for k in df.lead_day]).reshape(len(df), len(S4_NAMES))
+                           for k in klead]).reshape(len(df), len(S4_NAMES))
             tab = s4_fixed.assign(fold=S4_FIXED)[["fold", "lead_day", "n", *S4_NAMES]]
             df["s4_fold"] = S4_FIXED
         for j, n in enumerate(S4_NAMES):
@@ -202,6 +207,13 @@ def forecast_table(st, obs, lat, elev, coef, kp, s4_fixed=None):
         methods.insert(0, "S4")
     main = methods[0]
     df["Rs_main"], df["ETo_main"] = df[f"Rs_{main}"], df[f"ETo_{main}"]
+    if s3_fallback:                              # 운영 결측 규칙(#12): 하늘상태·강수확률이 없는 행은 S3
+        df["rs_method"] = np.where(df["ETo_main"].notna(), main, None)
+        if main == "S4":
+            fb = df["ETo_S4"].isna() & df["ETo_S3"].notna()
+            df.loc[fb, "Rs_main"] = df.loc[fb, "Rs_S3"]
+            df.loc[fb, "ETo_main"] = df.loc[fb, "ETo_S3"]
+            df.loc[fb, "rs_method"] = "S3"
     # 기준선: 발표일 전날(가장 최근의 완결된 관측일) 값, 최근 7일 평균
     df["ETo_pers"] = look("ETo_obs", df.run_date - pd.Timedelta(days=1))
     roll7 = o["ETo_obs"].rolling(7, min_periods=7).mean()
@@ -794,6 +806,8 @@ def main(argv=None):
     _common(w)
     w.add_argument("--irrig", default=None, help="관수 기록 CSV(날짜, 관수량_mm) — 관측 물수지에 반영")
     w.add_argument("--auto-irrigate", action="store_true", help="관수 규칙 시나리오: 전날 끝 Dr ≥ RAW면 Dr만큼 관수")
+    w.add_argument("--morning-obs-lag", action="store_true",
+                   help="(G5) 아침 02:10에 전날 관측이 없다고 보고 출발을 전날 아침 D+0 예보로 채움 — 관측 지연의 영향(파일명 _lag)")
     w.add_argument("--out", default=None)
     s = sub.add_parser("service", help="한 서비스 발표(아침 02시·저녁 17시)의 관수 전망 엑셀")
     _common(s, s4_default="rs_sky_coef.csv")
@@ -882,7 +896,8 @@ def _main_wb(a):
         print(d[["run_name", "lead_day", "n", "rmse", "mbe", "obs_mean"]].round(3).to_string(index=False))
         return
     if a.cmd == "wbverify":
-        res = W.run_wbverify(a.fcst, a.obs, a.stn, a.coef, a.s4_coef, a.grid, a.err, irrig=irrig, auto_irrigate=a.auto_irrigate)
+        res = W.run_wbverify(a.fcst, a.obs, a.stn, a.coef, a.s4_coef, a.grid, a.err, irrig=irrig, auto_irrigate=a.auto_irrigate,
+                             morning_obs_lag=a.morning_obs_lag)
         if not len(res["err"]):
             print(f"[경고] {a.err}에 검증 연도({res['year']})를 뺀 다른 해 오차가 없어 범위에 기본 상대 오차 {W.ERR_DEFAULT_REL:.0%}를 씀")
         soil = res["soil"]
@@ -895,7 +910,15 @@ def _main_wb(a):
             print(ln)
         grid = "-".join(res["check"]["location"]) or "grid"
         t = pd.to_datetime(res["runs"][res["runs"].ok].target)
-        tag = "_irrig" if a.auto_irrigate else ""
+        tag = ("_irrig" if a.auto_irrigate else "") + ("_lag" if a.morning_obs_lag else "")
+        if a.morning_obs_lag:
+            # 검증 엑셀의 경로 수식은 관측 Dr(D−1)에서 출발하므로 관측 지연 출발과 맞지 않는다 → 표(CSV)로만 남김
+            base = a.out or f"output/fcst_wbverify({a.stn})_{grid}_{t.min():%Y%m%d}_{t.max():%Y%m%d}{tag}"
+            base = os.path.splitext(base)[0]
+            res["lead"].to_csv(base + "_lead.csv", index=False, encoding="utf-8-sig", float_format="%.4f")
+            res["fe3_sum"].to_csv(base + "_need3.csv", index=False, encoding="utf-8-sig", float_format="%.4f")
+            print(f"[완료] {base}_lead.csv, {base}_need3.csv (관측 지연 분석은 엑셀을 만들지 않음)")
+            return
         out = a.out or f"output/fcst_wbverify({a.stn})_{grid}_{t.min():%Y%m%d}_{t.max():%Y%m%d}{tag}.xlsx"
         from fcst_wb_report import build_wbverify_workbook
         print(f"[완료] {build_wbverify_workbook(res, out)}")

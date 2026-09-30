@@ -109,7 +109,7 @@ def observed_wb(obs, kp, soil, irrig=None, fill=None, auto_irrigate=False, start
        auto_irrigate: 검증 시나리오 'FAO-56 기본 관수 규칙' — 전날 끝 Dr ≥ RAW면 그날 Dr만큼(순량) 관수해 포장용수량으로
        end  : 마지막 날(관측보다 뒤면 fill로 채움 — 운영에서 관측이 늦게 올 때)
        반환 열: date, Kc, ETo, ETo_src(관측/예보/없음), ETc, P, I_gross, I_net, Dr_prev, Ks, ETc_adj, DP, Dr, need,
-               filled(관측이 빠져 채운 날), tainted(채운 날에 기대는 상태: 채운 뒤 Dr이 0이 되기 전까지)"""
+               filled(관측이 빠져 채운 날), tainted(채운 날에 기대는 상태: 채운 뒤 Dr이 0이 되기 전까지), obs_row(ASOS 행이 있음 = 강수는 관측)"""
     o = obs.drop_duplicates("date").set_index("date").sort_index()
     idx = pd.date_range(pd.Timestamp(start) if start is not None else o.index.min(),
                         pd.Timestamp(end) if end is not None else o.index.max(), freq="D")
@@ -140,7 +140,7 @@ def observed_wb(obs, kp, soil, irrig=None, fill=None, auto_irrigate=False, start
         ks, etc_adj, dp, dr_new = wb_step(dr, P, etc, taw, raw, inet)
         tainted = filled or (tainted and dr_new > 0)
         rows.append(dict(date=d, Kc=k, ETo=e, ETo_src=s, ETc=etc, P=P, I_gross=ig, I_net=inet, Dr_prev=dr, Ks=ks,
-                         ETc_adj=etc_adj, DP=dp, Dr=dr_new, need=dr_new >= raw, filled=filled, tainted=tainted))
+                         ETc_adj=etc_adj, DP=dp, Dr=dr_new, need=dr_new >= raw, filled=filled, tainted=tainted, obs_row=bool(row)))
         dr = dr_new
     return pd.DataFrame(rows)
 
@@ -268,32 +268,64 @@ def _run_inputs(g, pre, o, etc_col):
              etc_t=[p["etc_t"] for p in pre] + [float(o.loc[t, "ETc"]) if t in o.index else np.nan for t in tgt],
              rain_t=[p["rain_t"] for p in pre] + [float(o.loc[t, "P"]) if t in o.index else np.nan for t in tgt],
              filled=[p["filled"] for p in pre] + [bool(o.loc[t, "filled"]) if t in o.index else True for t in tgt],
-             etc_p=[p["etc_p"] for p in pre] + list(g["ETc_pers"].astype(float)))
+             etc_p=[p["etc_p"] for p in pre] + list(g["ETc_pers"].astype(float)),
+             irr=[p.get("irr", 0.0) for p in pre] + [0.0] * len(tgt),
+             known=[bool(p.get("rain_known", False)) for p in pre] + [False] * len(tgt))
     return x
 
 
 def run_paths(dr0, x, soil):
-    """출발 고갈량과 입력 목록 → 경로별 끝 고갈량 목록 {PATHS 키 + 'true'}"""
+    """출발 고갈량과 입력 목록 → 경로별 끝 고갈량 목록 {PATHS 키 + 'true'}.
+       x['irr'](순관수량, 먼저 진행하는 날에만 — 관측 물수지 노란 칸)은 모든 경로의 물 공급에 더한다(식85의 I, 한 칸 식에서 P와 같은 자리)"""
     z = lambda v: [0.0 if pd.isna(a) else a for a in v]
     n = len(x["etc"])
-    return dict(center=path(dr0, x["etc"], x["rain_exp"], soil),
-                early=path(dr0, [e * (1 + r) for e, r in zip(x["etc"], x["rel"])], [0.0] * n, soil),
-                late=path(dr0, [e * max(1 - r, 0.0) for e, r in zip(x["etc"], x["rel"])], x["rain"], soil),
-                fcst=path(dr0, x["etc"], x["rain"], soil),
-                none=path(dr0, x["etc"], [0.0] * n, soil),
-                obs=path(dr0, x["etc"], z(x["rain_t"]), soil),
-                pers=path(dr0, z(x["etc_p"]), [0.0] * n, soil),
-                true=path(dr0, z(x["etc_t"]), z(x["rain_t"]), soil))
+    irr = x.get("irr") or [0.0] * n
+    known = x.get("known") or [False] * n             # 관측 강수를 아는 날(ASOS 행은 있고 ETo 입력만 빠짐): '빠르면'도 그 강수
+    w = lambda rain: [a + b for a, b in zip(rain, irr)]
+    return dict(center=path(dr0, x["etc"], w(x["rain_exp"]), soil),
+                early=path(dr0, [e * (1 + r) for e, r in zip(x["etc"], x["rel"])],
+                           w([p if k else 0.0 for p, k in zip(x["rain"], known)]), soil),
+                late=path(dr0, [e * max(1 - r, 0.0) for e, r in zip(x["etc"], x["rel"])], w(x["rain"]), soil),
+                fcst=path(dr0, x["etc"], w(x["rain"]), soil),
+                none=path(dr0, x["etc"], w([0.0] * n), soil),
+                obs=path(dr0, x["etc"], w(z(x["rain_t"])), soil),
+                pers=path(dr0, z(x["etc_p"]), w([0.0] * n), soil),
+                true=path(dr0, z(x["etc_t"]), w(z(x["rain_t"])), soil))
 
 
-def forecast_runs(ft, owb, soil, err=None, etc_col="ETc_main"):
+def _pre_day(m, o, day, etc_col, rain_obs=None, irr=0.0):
+    """관측 대신 그날 아침 발표 D+0 예보로 하루를 먼저 진행할 입력(세 경로 범위 포함). m: 그날 아침 D+0 예보 행, o: 관측 물수지(날짜 색인)
+       rain_obs: 그날 관측 강수를 이미 알면(ASOS 행은 있고 ETo 입력만 빠짐) 세 경로 모두 그 값. irr: 그날 순관수량(관측 물수지 노란 칸)"""
+    rain0 = 0.0 if pd.isna(m["rain"]) else float(m["rain"])
+    rexp = float(m["rain_exp"]) if "rain_exp" in m and pd.notna(m["rain_exp"]) else rain0
+    known = rain_obs is not None and not pd.isna(rain_obs)
+    if known:
+        rain0 = rexp = float(rain_obs)
+    has = day in o.index
+    return dict(etc=float(m[etc_col]), rain=rain0, rain_exp=rexp, rel=float(m["rel"]),
+                etc_t=float(o.loc[day, "ETc"]) if has else np.nan, rain_t=float(o.loc[day, "P"]) if has else np.nan,
+                filled=bool(o.loc[day, "filled"]) if has else True,
+                etc_p=float(m["ETc_pers"]) if "ETc_pers" in m and pd.notna(m["ETc_pers"]) else np.nan,
+                irr=float(irr), rain_known=known, date=pd.Timestamp(day), Kc=float(m["Kc"]), ETo=float(m["ETo_main"]),
+                pop_max=m.get("pop_max", np.nan))
+
+
+def forecast_runs(ft, owb, soil, err=None, etc_col="ETc_main", morning_obs_lag=None):
     """발표 × 대상일 예보 물수지와 참값.
        ft : forecast_table 결과(모든 행). 열 run_name, run, lead_day, target, Kc, ETc_main, rain, rain_exp, pop_max, ETc_pers
        owb: observed_wb 결과(출발 고갈량과 참값의 관측 ETc·강수)
        err: pooled_errors 결과(상대 오차 r). 없으면 r = ERR_DEFAULT_REL
+       morning_obs_lag: (G5) 아침 02:10에 전날(D−1) ASOS 일자료가 아직 없다고 볼 때의 출발. 참값은 그대로 관측 Dr(D−1 끝)
+            'fill' : 관측 Dr(D−2 끝)에서 D−1을 그날 아침 발표 D+0 예보(ETo, 기대 강수)로 채워 관측처럼 한 걸음 → 세 경로가 같은 출발
+                     (G4에서 구현한 observed_wb의 fill과 같은 값)
+            'range': D−1을 저녁 발표의 '그날'처럼 예보 하루로 먼저 진행(중심 = 기대 강수, 빠르면 = 비 없음·ETc × (1 + r),
+                     늦으면 = 예보 강수 전부·ETc × (1 − r)) — 중심은 'fill'과 같고 범위가 D−1의 불확실성을 담음
+            None   : 관측이 있다고 봄(검증 기본)
        반환: 행 = 발표 × 대상일. 경로 Dr_<PATHS 키>, 참값 Dr_true, 출발 고갈량 dr_start(중심 경로의 출발)·dr_start_true,
             유효 여부 ok와 제외 사유 reason"""
+    lag = {True: "fill", False: None}.get(morning_obs_lag, morning_obs_lag)
     o = owb.set_index("date")
+    lag_fill = fill_from_forecast(ft) if lag == "fill" else {}
     d = ft.copy()
     d["month"] = pd.to_datetime(d.target).dt.month
     d["rel"] = [err_lookup(err, "day", rn, k, m)[1] for rn, k, m in zip(d.run_name, d.lead_day, d.month)]
@@ -303,6 +335,7 @@ def forecast_runs(ft, owb, soil, err=None, etc_col="ETc_main"):
         g = g.sort_values("lead_day")
         D = pd.Timestamp(run).normalize()
         prev = D - pd.Timedelta(days=1)
+        base = prev                           # 출발 관측일(이날 끝 관측 Dr에서 출발)
         reason = ""
         # 출발 고갈량이 관측 결측일(예보로 채움)에 기대더라도 예보·참값이 같은 출발에서 시작하므로 비교는 공정하다 → 빼지 않음.
         # 참값이 관측 입력을 써야 하므로 대상일(저녁은 그날 D 포함)에 채운 날이 있으면 그 행부터 뺀다(아래 ok)
@@ -317,17 +350,28 @@ def forecast_runs(ft, owb, soil, err=None, etc_col="ETc_main"):
             elif D not in o.index:
                 reason = "그날 관측 물수지 없음"
             else:
-                m = mor0.loc[D]
-                rain0 = 0.0 if pd.isna(m["rain"]) else float(m["rain"])
-                pre = [dict(etc=float(m[etc_col]), rain=rain0,
-                            rain_exp=float(m["rain_exp"]) if "rain_exp" in m and pd.notna(m["rain_exp"]) else rain0,
-                            rel=float(m["rel"]), etc_t=float(o.loc[D, "ETc"]), rain_t=float(o.loc[D, "P"]),
-                            filled=bool(o.loc[D, "filled"]), etc_p=float(m["ETc_pers"]) if pd.notna(m["ETc_pers"]) else np.nan)]
-        dr_obs0 = float(o.loc[prev, "Dr"]) if prev in o.index else np.nan
+                pre = [_pre_day(mor0.loc[D], o, D, etc_col)]
+        if lag == "range" and rn == "아침" and not reason:
+            base = prev - pd.Timedelta(days=1)
+            if base not in o.index or prev not in mor0.index or pd.isna(mor0.loc[prev, etc_col]):
+                reason = "관측 지연 계산: 전전날 관측 물수지 또는 전날 아침 D+0 예보 없음"
+            else:
+                pre = [_pre_day(mor0.loc[prev], o, prev, etc_col)]
+        dr_obs0 = float(o.loc[base, "Dr"]) if base in o.index else np.nan
+        dr_f0 = dr_obs0                        # 예보 경로의 출발(관측 지연 'fill'이 아니면 참값과 같음)
+        if lag == "fill" and rn == "아침" and not reason:
+            p2 = prev - pd.Timedelta(days=1)
+            if p2 not in o.index or prev not in lag_fill:
+                reason = "관측 지연 계산: 전전날 관측 물수지 또는 전날 아침 D+0 예보 없음"
+            else:
+                e_, r_ = lag_fill[prev]
+                dr_f0 = wb_step(float(o.loc[p2, "Dr"]), r_, float(o.loc[prev, "Kc"]) * e_, soil["taw"], soil["raw"])[3]
         x = _run_inputs(g, pre, o, etc_col)
         n0 = len(pre)
-        res = run_paths(dr_obs0, x, soil) if not reason else {k: [np.nan] * len(x["etc"]) for k in list(PATHS) + ["true"]}
-        start = {k: (v[n0 - 1] if n0 else dr_obs0) for k, v in res.items()}
+        res = run_paths(dr_f0, x, soil) if not reason else {k: [np.nan] * len(x["etc"]) for k in list(PATHS) + ["true"]}
+        if not reason and dr_f0 != dr_obs0:
+            res["true"] = run_paths(dr_obs0, x, soil)["true"]
+        start = {k: (v[n0 - 1] if n0 else (dr_obs0 if k == "true" else dr_f0)) for k, v in res.items()}
         for i, (_, r) in enumerate(g.iterrows()):
             j = n0 + i
             ok_true = not reason and not any(x["filled"][:j + 1])
@@ -487,13 +531,16 @@ def rain_verification(runs):
 
 
 def run_wbverify(fcst_paths, obs_path, stn, coef_path="rs_coef.csv", s4_coef_path=None, grid=None,
-                 err_path="fcst_error_table.csv", irrig=None, auto_irrigate=False, thresholds=(30, 40, 50, 60)):
-    """G4 검증 전체: 예보표 → 관측 물수지 → 발표별 예보 물수지(범위는 검증 연도를 뺀 오차표) → 지표"""
+                 err_path="fcst_error_table.csv", irrig=None, auto_irrigate=False, thresholds=(30, 40, 50, 60),
+                 morning_obs_lag=False):
+    """G4 검증 전체: 예보표 → 관측 물수지 → 발표별 예보 물수지(범위는 검증 연도를 뺀 오차표) → 지표.
+       morning_obs_lag: (G5) 아침 발표 때 전날 관측이 없다고 보고 출발을 예보로 채운 값으로(forecast_runs)"""
     p = prepare(fcst_paths, obs_path, stn, coef_path, s4_coef_path, grid)
-    return wbverify_from(p, stn, err_path, irrig, auto_irrigate, thresholds)
+    return wbverify_from(p, stn, err_path, irrig, auto_irrigate, thresholds, morning_obs_lag)
 
 
-def wbverify_from(p, stn, err_path="fcst_error_table.csv", irrig=None, auto_irrigate=False, thresholds=(30, 40, 50, 60)):
+def wbverify_from(p, stn, err_path="fcst_error_table.csv", irrig=None, auto_irrigate=False, thresholds=(30, 40, 50, 60),
+                  morning_obs_lag=False):
     """prepare 결과로 G4 검증 계산"""
     from cropwater_fcst import coef_file
     ft = p["ft"]
@@ -502,10 +549,10 @@ def wbverify_from(p, stn, err_path="fcst_error_table.csv", irrig=None, auto_irri
     rows = load_error_rows(coef_file(err_path)) if err_path else pd.DataFrame(columns=ERR_COLS)
     err = pooled_errors(rows, stn, exclude_year=year)
     owb = observed_wb(p["obs"], p["kp"], soil, irrig=irrig, fill=fill_from_forecast(ft), auto_irrigate=auto_irrigate)
-    runs = forecast_runs(ft, owb, soil, err)
+    runs = forecast_runs(ft, owb, soil, err, morning_obs_lag=morning_obs_lag)
     raw = soil["raw"]
     res = dict(p, stn=str(stn), soil=soil, year=year, err=err, err_rows=rows, err_path=err_path, owb=owb, runs=runs,
-               auto_irrigate=auto_irrigate, irrig=irrig or {}, thresholds=tuple(thresholds))
+               auto_irrigate=auto_irrigate, irrig=irrig or {}, thresholds=tuple(thresholds), morning_obs_lag=morning_obs_lag)
     res["lead"] = wb_lead_metrics(runs)
     res["month"] = wb_month_metrics(runs)
     res["cont"] = need_contingency(runs, "Dr_center", raw)
@@ -548,42 +595,64 @@ def wb_findings(res):
 
 
 # ── 한 발표의 서비스 전망 ─────────────────────────────────────────────────
-def service_outlook(ft, owb, soil, err, run_name, run, etc_col="ETc_main"):
+def day_forecast(ft, day, etc_col="ETc_main"):
+    """하루(day)를 먼저 진행할 예보 행: 그날 아침 발표 D+0 → 없으면 그날을 대상으로 한 가장 최근 서비스 발표(그날 02시까지)"""
+    day = pd.Timestamp(day)
+    t = pd.to_datetime(ft.target)
+    m = ft[(ft.run_name == "아침") & (ft.lead_day == 0) & (t == day) & ft[etc_col].notna()]
+    if len(m):
+        return m.iloc[0]
+    m = ft[(t == day) & ft[etc_col].notna() & (pd.to_datetime(ft.run) <= day + pd.Timedelta(hours=2))]
+    return m.sort_values("run").iloc[-1] if len(m) else None
+
+
+def service_outlook(ft, owb, soil, err, run_name, run, etc_col="ETc_main", obs_last=None):
     """한 서비스 발표의 전망(서비스 엑셀·CLI 공용).
+       obs_last: 관측이 있는 마지막 날(없으면 D−1). 그 뒤 D−1까지는 관측이 아직 없는 날 → 아침 D+0 예보로 '먼저 진행하는 날'
+                 (저녁 발표의 그날 D와 같이 세 경로 범위를 담음 — VALIDATION G5 관측 지연, #12). 그날 관측 강수(ASOS 행)나
+                 관수 기록(관측 물수지 노란 칸)이 있으면 그 값을 씀
        반환: dict(days=대상일 표[선행일, 날짜, 주/참고, ETo, Kc, ETc, ETc 오차, 강수 예보·기대 강수·강수확률, 세 경로 Dr, 상태],
-                 start = 출발 고갈량(중심), dr_obs_prev, pre(저녁의 그날 D 진행 입력), need = {center, early, late: 순번 또는 None},
-                 cum3 = (예보 ETc 3일 합, 오차), advice = (순관수량, 공급 관수량))"""
+                 start = 출발 고갈량(중심, 먼저 진행한 날 뒤), dr_obs_prev = 관측 마지막 날 끝 Dr, prev = 관측 마지막 날,
+                 pre = 먼저 진행한 날 목록(관측 지연 날 'lag' + 저녁의 그날 'today'), lag_days,
+                 need = {center, early, late: 순번 또는 None}, cum3 = (예보 ETc 3일 합, 오차), advice = (순관수량, 공급 관수량))"""
     d = ft[(ft.run_name == run_name) & (ft.run == pd.Timestamp(run))].sort_values("lead_day").copy()
     if d.empty:
         raise ValueError(f"{run_name} {run} 발표가 예보표에 없습니다")
     if d[etc_col].isna().any():
         raise ValueError(f"{run_name} {run} 발표의 예보 ETc가 비어 있습니다(필수 요소 결측)")
     d["month"] = pd.to_datetime(d.target).dt.month
-    e = [err_lookup(err, "day", run_name, k, m) for k, m in zip(d.lead_day, d.month)]
+    # 운영(#12): 직전 발표로 대신한 행은 대체 발표 종류·선행일의 오차(err_name·err_lead, ops_service_table). 검증 표에는 없음 → 서비스 발표 칸
+    en = d["err_name"] if "err_name" in d else pd.Series(run_name, index=d.index)
+    el = d["err_lead"] if "err_lead" in d else d["lead_day"]
+    e = [err_lookup(err, "day", n_, k, m) for n_, k, m in zip(en, el, d.month)]
     d["eto_rmse"], d["rel"], d["err_n"], d["err_src"] = [x[0] for x in e], [x[1] for x in e], [x[2] for x in e], [x[3] for x in e]
     d["etc_err"] = d[etc_col] * d.rel                  # ± 오차 = 예보 ETc × 상대 오차 r (범위 경로와 같은 크기)
     D = pd.Timestamp(run).normalize()
     o = owb.set_index("date")
-    prev = D - pd.Timedelta(days=1)
+    prev = pd.Timestamp(obs_last) if obs_last is not None else D - pd.Timedelta(days=1)
     if prev not in o.index:
         raise ValueError(f"관측 물수지에 {prev:%Y-%m-%d}(출발일)가 없습니다 — 01-Cycle 워크북 기간 확인")
+    lag_days = list(pd.date_range(prev + pd.Timedelta(days=1), D - pd.Timedelta(days=1)))
     pre = []
-    if run_name == "저녁":
-        m = ft[(ft.run_name == "아침") & (ft.lead_day == 0) & (pd.to_datetime(ft.target) == D)]
-        if m.empty or m[etc_col].isna().any():
-            raise ValueError(f"저녁 발표는 그날({D:%Y-%m-%d}) 아침 발표의 D+0 예보가 필요합니다")
-        m = m.iloc[0]
-        r0 = err_lookup(err, "day", "아침", 0, D.month)
-        rain0 = 0.0 if pd.isna(m["rain"]) else float(m["rain"])
-        pre = [dict(date=D, etc=float(m[etc_col]), rain=rain0, rain_exp=float(m.get("rain_exp", rain0)) if pd.notna(m.get("rain_exp", np.nan)) else rain0,
-                    rel=r0[1], etc_t=np.nan, rain_t=np.nan, filled=False, etc_p=np.nan, Kc=float(m["Kc"]), ETo=float(m["ETo_main"]),
-                    pop_max=m.get("pop_max", np.nan))]
+    for day, kind in [(x, "lag") for x in lag_days] + ([(D, "today")] if run_name == "저녁" else []):
+        m = day_forecast(ft, day, etc_col)
+        if m is None:
+            raise ValueError(f"{day:%Y-%m-%d}을 진행할 예보가 없습니다(아침 발표 D+0)" if kind == "lag" else
+                             f"저녁 발표는 그날({D:%Y-%m-%d}) 아침 발표의 D+0 예보가 필요합니다")
+        m = m.copy()
+        m["rel"] = err_lookup(err, "day", "아침", 0, day.month)[1]
+        has = day in o.index
+        rain_obs = float(o.loc[day, "P"]) if (kind == "lag" and has and bool(o.loc[day].get("obs_row", False))) else None
+        irr = float(o.loc[day, "I_net"]) if (kind == "lag" and has) else 0.0
+        pre.append(dict(_pre_day(m, o, day, etc_col, rain_obs, irr), kind=kind))
     x = _run_inputs(d, pre, o, etc_col)
     dr0 = float(o.loc[prev, "Dr"])
     res = run_paths(dr0, x, soil)
     n0 = len(pre)
     for k in ("center", "early", "late", "fcst"):
         d[f"Dr_{k}"] = res[k][n0:]
+    for i, p in enumerate(pre):
+        p.update({f"Dr_{k}": res[k][i] for k in ("center", "early", "late")})
     d["order"] = range(1, len(d) + 1)
     d["main"] = d.order <= MAIN_DAYS
     raw = soil["raw"]
@@ -592,13 +661,22 @@ def service_outlook(ft, owb, soil, err, run_name, run, etc_col="ETc_main"):
     need = {k: (0 if starts[k] >= raw else first_need(res[k][n0:], raw)) for k in ("center", "early", "late")}
     main = d[d.main]
     c3 = err_lookup(err, "cum3", run_name, int(main.lead_day.iloc[0]), int(main.month.iloc[0]))
+    if "err_name" in main and bool(main.get("backup", pd.Series(False)).any()):
+        cb = err_lookup(err, "cum3", str(main.err_name.iloc[0]), int(main.err_lead.iloc[0]), int(main.month.iloc[0]))
+        c3 = cb if cb[3] != "기본값" else c3             # 대체 발표 칸이 오차표에 없으면 서비스 발표 칸(THEORY 9장 #12)
     s3 = float(main[etc_col].sum())
     cum3 = (s3, s3 * c3[1], c3[3], c3[1])                # (3일 합, ± 오차 = 합 × 3일 누적 상대 오차, 출처, 상대 오차)
     k_need = need["center"]
     dr_need = start if k_need == 0 else (float(d.Dr_center.iloc[k_need - 1]) if k_need else np.nan)
     advice = (dr_need, dr_need / soil["ea"]) if not pd.isna(dr_need) else (np.nan, np.nan)
-    return dict(days=d, start=start, dr_obs_prev=dr0, prev=prev, pre=pre, need=need, cum3=cum3, advice=advice,
-                run_name=run_name, run=pd.Timestamp(run))
+    return dict(days=d, start=start, dr_obs_prev=dr0, prev=prev, pre=pre, lag_days=lag_days, need=need, cum3=cum3,
+                advice=advice, run_name=run_name, run=pd.Timestamp(run))
+
+
+def last_observed(owb, before):
+    """관측 물수지에서 관측 ETo가 있는 마지막 날(before 전). 없으면 None"""
+    m = owb[(owb.ETo_src == "관측") & (pd.to_datetime(owb.date) < pd.Timestamp(before))]
+    return pd.Timestamp(m.date.max()) if len(m) else None
 
 
 def recent_bias(ft, run, days=30, col="ETo_main"):
@@ -649,7 +727,11 @@ def service_from(p, stn, run=None, err_path="fcst_error_table.csv", irrig=None, 
     err = pooled_errors(rows, stn)
     D = pd.Timestamp(run).normalize()
     owb = observed_wb(p["obs"], p["kp"], soil, irrig=irrig, fill=fill_from_forecast(ft), end=D - pd.Timedelta(days=1))
-    ol = service_outlook(ft, owb, soil, err, rn, run)
+    # 관측이 아직 없는 최근 날(보통 아침 02:10의 전날)은 관측 물수지에 예보로 채워 보이되(관수 기록 칸), 전망은 그날부터 범위를 담아
+    # 예보 하루로 진행한다(VALIDATION G5: 채운 값을 관측처럼 쓰면 범위 적중이 80%·71%로 떨어짐)
+    last = last_observed(owb, D)
+    obs_last = last if (last is not None and last < D - pd.Timedelta(days=1)) else None
+    ol = service_outlook(ft, owb, soil, err, rn, run, obs_last=obs_last)
     name, grid_std = STATIONS.get(str(stn), ("", ""))
     return dict(outlook=ol, owb=owb, soil=soil, err=err, err_path=err_path, meta=p["meta"], stn=str(stn), stn_name=name,
                 grid="-".join(p["check"].get("location") or []) or grid_std, main=main_method(ft), irrig=irrig or {}, ft=ft,

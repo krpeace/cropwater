@@ -46,6 +46,7 @@
 | **51개 작물 라이브러리** | FAO-56 표준 파라미터(Kc·Zr·p) 내장 (`crops_library.csv`) |
 | **단기예보 ETo·ETc 예측** (02-Cycle, H2 검증 완료) | 기상청 단기예보(아침 02시 → 오늘~D+3, 저녁 17시 → 내일~D+4)로 ETo·ETc 예측, 일사는 기온교차·강수확률·하늘상태로 추정(S4), 과거 예보로 선행시간별·월별 검증 |
 | **관수 필요 예상일** (02-Cycle G4) | 어제 끝 관측 Dr + 예보 ETc − 기대 강수(강수량 × 강수확률) → 며칠 뒤 Dr ≥ RAW가 되는 날과 범위(빠르면·늦으면), 3일 누적 ETc ± 오차, 권장 관수량. 서비스(관수 전망) 엑셀 |
+| **운영 수집기** (02-Cycle G5) | 하루 두 번(02:10·17:10) 단기예보·ASOS를 API로 받아 관수 전망 엑셀을 자동으로 만듦. 재시도·마감, 원자료 보관, 못 받으면 직전 발표·S3로 대신, 전날 관측이 없으면 예보 하루로 범위 포함. 수집 로그 → H3 보고서 |
 
 ---
 
@@ -160,6 +161,21 @@ python cropwater_fcst.py service  --fcst data/fcst_101 --obs output/eto101_apple
 | `--auto-irrigate` | (wbverify) 관수 규칙 시나리오: 전날 끝 Dr ≥ RAW면 그 Dr만큼 관수 |
 | `--run` | (service) 발표시각 `YYYY-MM-DD HH`(02 또는 17). 없으면 자료의 가장 최근 서비스 발표. S4는 운영 계수(`--s4-coef` 기본 `rs_sky_coef.csv`) |
 
+### cropwater_ops.py — 운영 수집기 (02-Cycle G5)
+
+```bash
+cp ops_config.example.json ops_config.json      # 관측 워크북 경로·격자 등을 고침
+python cropwater_ops.py run --config ops_config.json --no-wait     # 설치 확인: 지금 슬롯을 한 번 시도
+python cropwater_ops.py run --config ops_config.json               # 스케줄러가 02:10·17:10에 실행 → output/service/fcst_service(101)_YYYYMMDD_HH.xlsx
+python cropwater_ops.py probe-asos --config ops_config.json        # 전날 ASOS 일자료 조회 가능 시각 점검(1~2주 매시)
+python cropwater_ops.py report --config ops_config.json --since 2026-10-01   # H3 보고서(정시 수집 성공률·백업 전환)
+python cropwater_ops.py grid 37.90262 127.73570                    # 농장 좌표 → 예보 격자
+```
+
+- 국내 인터넷에 연결된 컴퓨터에서 돌립니다(공공데이터포털은 해외 접속이 불안정). Windows 작업 스케줄러·cron 등록 방법은 [ARCHITECTURE.md 7장 ◇ 운영 수집기](docs/ARCHITECTURE.md)에 있습니다.
+- 받은 응답은 `data/ops/raw`에 그대로(gzip) 보관하고, 시도마다 `data/ops/log/collect_log.csv`, 슬롯마다 `slot_log.csv`에 남깁니다.
+- 네트워크 없이 과거 예보로 운영 경로를 재생해 볼 수 있습니다: `python ops_replay.py --fcst data/fcst_101_2026 --obs output/eto101_apple_20260101_20260928.xlsx --start 2026-06-01 --end 2026-06-30 --data data/replay`
+
 > 가설·합격 기준·게이트 판정은 [docs/VALIDATION.md](docs/VALIDATION.md), 이론은 [THEORY.md 9장](docs/THEORY.md)에 있습니다.
 >
 > ASOS 101 춘천·사과 검증 결과: 두 해 모두 H2 기준 충족 (주 방법 S4 = 기온교차 + 강수확률 하루 최대 + 하늘상태, 두 해 모두 운영과 같은 OpenAPI 자료)
@@ -169,6 +185,8 @@ python cropwater_fcst.py service  --fcst data/fcst_101 --obs output/eto101_apple
 >
 > 예보 물수지(G4, 두 해, 사과·양토 RAW 60 mm): 3일 예상 고갈량 오차 7~15 mm로 예보 없이 보는 것보다 24~42% 작음. 오차의 대부분은 강수 예보에서 옴(강수가 완벽하면 0.8~2.1 mm). 강수는 기대 강수(시각별 강수량 × 강수확률)로 넣음.
 > 관수 필요 예상일은 사건의 절반가량이 하루 안으로 맞고, 범위(빠르면~늦으면)가 실제 날짜를 모두 담음 — 실제 날짜가 '빠르면'보다 앞선 적 없음
+>
+> 운영 수집기(G5): 과거 예보로 만든 모의 API 재생에서 운영 경로가 검증 결과를 그대로 재현하고(2026년 생육기 슬롯 364회), 발표 지연·누락·서버 오류·인증 오류를 넣으면 규칙대로 재시도·백업함. 아침 02:10에 전날 관측이 없으면 3일 예상 고갈량 오차가 D+0에서 약 3.5 mm 커지지만 범위는 실제 날짜를 모두 담음. 정시 수집률(H3 ≥ 99%)은 현장 시험으로 판정 예정
 
 ---
 
@@ -236,6 +254,15 @@ python cropwater_fcst.py service  --fcst data/fcst_101 --obs output/eto101_apple
 | **예보 물수지 / 관측 물수지** | 세 경로 고갈량(수식) / 어제까지 물수지 — 노란 칸에 관수량을 적으면 전망이 다시 계산됨 |
 | **오차표 / 편향 점검 / 설정 / 방법** | 예보 ETo 오차 / 월·선행일별 편향(보정은 안 함) / 토양 값 / 방법 |
 
+- `cropwater_ops.py run`으로 만든 엑셀은 '관수 전망'에 **수집 정보**(계산한 발표·일사 방법·어제 관측)가 더해지고, 직전 발표로 대신했거나 어제 관측이 아직 없으면 머리에 ※ 줄이 나옵니다.
+
+### cropwater_ops.py report (4시트) — H3 운영 수집 점검 (G5)
+
+| 시트 | 내용 |
+| :--- | :--- |
+| **요약** | 예정 슬롯, 정시 수집 성공률(기준 99%), 백업 자동 전환율(기준 100%), H3 판정(표본 100회 미만이면 중간 점검), 전날 ASOS 조회 시각 |
+| **슬롯 / 수집 시도 / 전날 관측** | 슬롯별 처음·마지막 결과 / 시도별 응답 코드·행 수·완결 여부 / 날짜별 전날 관측이 처음 조회된 시각 |
+
 📖 자세한 해석 방법 → [docs/RESULTS_GUIDE.md](docs/RESULTS_GUIDE.md)
 
 ---
@@ -281,6 +308,12 @@ cropwater/
 ├── fcst_report.py              ← H2 검증 엑셀 (11~13시트, 라이브 수식)
 ├── fcst_wb.py                  ← (G4) 관측·예보 물수지, 관수 필요 예상일·범위, 오차표, 서비스 전망
 ├── fcst_wb_report.py           ← (G4) 예보 물수지 검증 엑셀 / 서비스(관수 전망) 엑셀
+├── cropwater_ops.py            ← (G5) 운영 CLI: run / probe-asos / report / grid
+├── kma_fcst.py                 ← (G5) 단기예보·ASOS API 조회, 완결성 점검, 원자료 보관, 수집 로그
+├── kma_grid.py                 ← (G5) 위경도 ↔ 단기예보 격자
+├── ops_report.py               ← (G5) H3 보고서 엑셀
+├── ops_replay.py               ← (G5) 모의 API 재생(오프라인 검증)
+├── ops_config.example.json     ← (G5) 운영 설정 예시 (ops_config.json으로 복사, .gitignore)
 │
 ├── crops_library.csv           ← 51개 작물 Kc·Zr·p (FAO-56 Table 12·22)
 ├── stations_backup.csv         ← ASOS 지점 메타 캐시
@@ -295,7 +328,8 @@ cropwater/
 ├── tests/
 │   ├── test_fao56.py           ← FAO-56 핵심 계산·물수지 한 걸음·관수 기록 단위 테스트 (pytest)
 │   ├── test_fcst.py            ← 02-Cycle 예보 모듈 단위 테스트
-│   └── test_wb.py              ← 02-Cycle G4 예보 물수지 단위 테스트
+│   ├── test_wb.py              ← 02-Cycle G4 예보 물수지 단위 테스트
+│   └── test_ops.py             ← 02-Cycle G5 운영 수집기 단위 테스트
 │
 └── docs/
     ├── THEORY.md               ← 관수·토양학 이론 (농대생 입문용)

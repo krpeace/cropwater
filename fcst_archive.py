@@ -577,6 +577,59 @@ def daily_inputs(arch, run, targets, lat=None, lon=None):
 SERVICE_RUNS = {"아침": (2, range(0, 4)), "저녁": (17, range(1, 5))}   # 발표시각, 대상일(D+k)
 
 
+def error_kind(issue):
+    """발표 종류: 02~14시 발표 → '아침'(글피까지), 17~23시 발표 → '저녁'(그글피까지). 오차표 칸을 고를 때 씀"""
+    return "아침" if pd.Timestamp(issue).hour <= 14 else "저녁"
+
+
+def backup_source(arch, run, max_age_h=24):
+    """운영 결측 규칙(#12): 서비스 발표 run을 쓸 수 있으면 run, 아니면 run 이전 max_age_h 시간 안에서 필수 6요소가 찬
+       가장 최근 발표. 없으면 None"""
+    run = pd.Timestamp(run)
+    comp = arch.complete_issues
+    if run in set(comp):
+        return run
+    cand = [t for t in comp if run - pd.Timedelta(hours=max_age_h) <= t < run]
+    return max(cand) if cand else None
+
+
+def ops_service_table(arch, runs=SERVICE_RUNS, lat=None, lon=None, max_age_h=24, start=None, end=None):
+    """운영용 서비스 표 — service_table과 같지만 서비스 발표가 없으면 직전 발표로 대신한다(#12, 검증 규칙과 다름).
+       대신한 발표는 그 발표 시각까지의 자료로 일 입력을 만들고(daily_inputs(arch, 대체 발표, 서비스 대상일)),
+       선행일은 두 가지로 적는다: lead_day = 서비스 발표 기준(표시·순번), src_lead = 대체 발표 날짜 기준(S4 계수·오차 r).
+       추가 열: src_run, src_lead, backup, err_name(오차표 발표 종류), err_lead
+       대신할 발표도 없는 슬롯은 arch.failed_slots에 (구분, 발표시각)으로 남긴다.
+       start·end: 서비스 발표시각 범위(없으면 자료 전체)"""
+    out = []
+    arch.failed_slots = []
+    iss = arch.issues
+    if not iss:
+        return pd.DataFrame()
+    t0 = pd.Timestamp(start) if start is not None else pd.Timestamp(iss[0]).normalize()
+    t1 = pd.Timestamp(end) if end is not None else pd.Timestamp(iss[-1])
+    days = pd.date_range(t0.normalize(), t1.normalize(), freq="D")
+    for name, (hour, leads) in runs.items():
+        for day in days:
+            run = day + pd.Timedelta(hours=hour)
+            if run < t0 or run > t1:
+                continue
+            src = backup_source(arch, run, max_age_h)
+            if src is None:
+                arch.failed_slots.append((name, run))
+                continue
+            targets = [run.normalize() + pd.Timedelta(days=k) for k in leads]
+            df = daily_inputs(arch, src, targets, lat, lon)
+            df = df.rename(columns={"lead_day": "src_lead"})
+            df.insert(0, "lead_day", [int(k) for k in leads])
+            df.insert(0, "run", run); df.insert(0, "run_name", name)
+            df["src_run"] = src
+            df["backup"] = bool(src != run)
+            df["err_name"] = name if src == run else error_kind(src)
+            df["err_lead"] = df["lead_day"] if src == run else df["src_lead"]
+            out.append(df)
+    return pd.concat(out, ignore_index=True).sort_values(["run", "lead_day"]).reset_index(drop=True) if out else pd.DataFrame()
+
+
 def service_table(arch, runs=SERVICE_RUNS, lat=None, lon=None):
     """모든 서비스 발표(02시·17시)에 대해 대상일별 일 입력을 한 표로.
        한 요소라도 값이 없는 발표는 쓰지 않고 arch.skipped_runs에 (구분, 발표시각, 빠진 요소)를 남긴다.
