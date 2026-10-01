@@ -188,6 +188,24 @@ class TestWaterBalance:
             ks, _, dp, dr = wb_step(dr, p, e, self.TAW, self.RAW)
             assert rec["Dr"] == pytest.approx(round(dr, 2)) and rec["DP"] == pytest.approx(round(dp, 2))
 
+    def test_irrigation_reduces_depletion(self):
+        """관수 I(순량)는 비처럼 Dr을 줄임: Dr 70, 순관수 66.5, ETc 5 → Ks 0.8333, Dr = 70 − 66.5 + 4.1667"""
+        from fao56_core import wb_step
+        ks, etc_adj, dp, dr = wb_step(70.0, 0.0, 5.0, self.TAW, self.RAW, irr_net=66.5)
+        assert ks == pytest.approx(50 / 60)
+        assert dp == 0.0 and dr == pytest.approx(70 - 66.5 + 5 * 50 / 60)
+
+    def test_over_irrigation_percolates(self):
+        """[식88] 관수가 고갈량 + 당일 ETc보다 많으면 남는 양은 심층침투: DP = 40 − 5 − 20 = 15, Dr 0"""
+        from fao56_core import wb_step
+        ks, etc_adj, dp, dr = wb_step(20.0, 0.0, 5.0, self.TAW, self.RAW, irr_net=40.0)
+        assert dp == pytest.approx(15.0) and dr == 0.0
+
+    def test_no_irrigation_default_unchanged(self):
+        """irr_net 생략(0)이면 무관수 결과와 같음"""
+        from fao56_core import wb_step
+        assert wb_step(30.0, 12.0, 5.0, self.TAW, self.RAW) == wb_step(30.0, 12.0, 5.0, self.TAW, self.RAW, irr_net=0.0)
+
     def test_dr_lower_bound(self):
         """Dr은 0 미만이 될 수 없음"""
         assert max(0.0, 0.0 - 200.0 + 5.0) >= 0
@@ -282,8 +300,39 @@ class TestMissingDays:
         assert wb["결과요약"]["B26"].value == "=COUNTA(원데이터!O2:O12)"
 
 
+class TestIrrigationLog:
+    """fao56_core.load_irrigation_log — 관수 기록 CSV(날짜, 관수량_mm)"""
+
+    def test_formats_and_duplicates(self, tmp_path):
+        from fao56_core import load_irrigation_log
+        f = tmp_path / "irr.csv"
+        f.write_text("날짜,관수량_mm,메모\n2026-05-18,20,점적\n20260518,5,\n2026.06.01,12.5,\n2026/06/02,,빈 값\n", encoding="utf-8-sig")
+        log = load_irrigation_log(str(f))
+        assert log == {dt.date(2026, 5, 18): 25.0, dt.date(2026, 6, 1): 12.5}
+
+    def test_cp949_and_english_header(self, tmp_path):
+        from fao56_core import load_irrigation_log
+        f = tmp_path / "irr.csv"
+        f.write_bytes("date,amount_mm,메모\n2026-07-01,30,관수\n".encode("cp949"))
+        assert load_irrigation_log(str(f)) == {dt.date(2026, 7, 1): 30.0}
+
+    def test_bad_header_raises(self, tmp_path):
+        from fao56_core import load_irrigation_log
+        f = tmp_path / "irr.csv"
+        f.write_text("day,water\n2026-07-01,30\n", encoding="utf-8")
+        with pytest.raises(ValueError):
+            load_irrigation_log(str(f))
+
+    def test_negative_raises(self, tmp_path):
+        from fao56_core import load_irrigation_log
+        f = tmp_path / "irr.csv"
+        f.write_text("날짜,관수량_mm\n2026-07-01,-3\n", encoding="utf-8")
+        with pytest.raises(ValueError):
+            load_irrigation_log(str(f))
+
+
 class TestStationWaterBalanceSheet:
-    """cropwater_station.build_workbook 물수지 시트 수식: Ks는 Dr,i-1(G열), DP는 식(88) 원식"""
+    """cropwater_station.build_workbook 물수지 시트 수식: Ks는 Dr,i-1(G열), 관수량 I열 × Ea"""
 
     def test_formulas(self, tmp_path):
         import openpyxl
@@ -294,9 +343,9 @@ class TestStationWaterBalanceSheet:
         rows = [dict(tm=dt.date(2026, 5, d), maxTa=25.0, minTa=12.0, avgTa=18.0, avgRhm=60.0, minRhm=35.0, avgWs=2.0,
                      avgPv=12.0, avgTd=9.0, avgPa=1000.0, sumGsr=20.0, sumSsHr=8.0, sumLrgEv=4.0, sumRn=None) for d in (1, 2, 3)]
         p = dict(lat=37.9, elev=77.7, anem=10.0, fetch=100.0, stn="101", start="20260501", end="20260503",
-                 meta_source="MANUAL", crop=crop, bud_date=dt.date(2026, 4, 1))
+                 meta_source="MANUAL", crop=crop, bud_date=dt.date(2026, 4, 1), irrig={dt.date(2026, 5, 2): 20.0})
         _, path = build_workbook(rows, p, str(tmp_path / "wb.xlsx"))
         ws = openpyxl.load_workbook(path)["물수지"]
         assert ws["J3"].value.startswith("=IF(G3<=")          # Ks ← 전날 끝 고갈량
-        assert ws["H3"].value == "=MAX(F3-K3-G3, 0)"          # DP 식(88) 원식
-        assert ws["L3"].value.startswith("=MIN(MAX(G3-F3+K3+H3, 0)")
+        assert "I3*" in ws["H3"].value and "I3*" in ws["L3"].value
+        assert ws["I3"].value == 20.0 and ws["I2"].value == 0.0 and ws["I4"].value == 0.0

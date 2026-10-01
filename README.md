@@ -87,6 +87,7 @@ cp apikey.txt.example apikey.txt   # 복사 후 실제 키 입력
 ```bash
 python cropwater_station.py --stn 101 --crop apple --start 20260401 --end 20260831 --bud 20260401
 python cropwater_station.py --stn 216 --crop kimchi_cabbage --start 20260701 --end 20260831 --bud 20260706
+python cropwater_station.py --stn 101 --crop apple --start 20260401 --end 20260831 --irrig 관수기록.csv   # 관수 기록 반영
 ```
 
 | 파라미터 | 설명 | 예시 |
@@ -95,6 +96,7 @@ python cropwater_station.py --stn 216 --crop kimchi_cabbage --start 20260701 --e
 | `--crop` | 작물 ID | `apple` |
 | `--start` / `--end` | 조회 기간 YYYYMMDD (미래 날짜는 전날로 자동 조정) | `20260401` |
 | `--bud` | 생육 시작일 (발아·정식일) | `20260401` |
+| `--irrig` | 관수 기록 CSV (머리행 `날짜,관수량_mm[,메모]`, 공급량 mm, 10a당 1톤 = 1 mm). 물수지 시트 I열에 채워짐 | `관수기록.csv` |
 | `--out` | 출력 파일명 (생략 시 자동 생성) | `result.xlsx` |
 
 > 파라미터를 생략하면 대화형 프롬프트가 순서대로 묻습니다.
