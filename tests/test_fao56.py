@@ -200,3 +200,50 @@ class TestKcCurve:
     def test_dormancy(self):
         """생육 종료 후 휴면기: Kc = 0"""
         assert self._kc(dt.date(2026, 11, 1)) == 0.0
+
+
+class TestMissingDays:
+    """관측 결측일(#20): 빠진 날짜 행 추가 + ETo = 앞 7일 평균, 강수 0"""
+
+    def test_missing_dates_interior_only(self):
+        from fao56_core import missing_dates
+        ds = [dt.date(2025, 6, d) for d in (3, 4, 5, 7, 10)]
+        assert missing_dates(ds) == [dt.date(2025, 6, 6), dt.date(2025, 6, 8), dt.date(2025, 6, 9)]
+        assert missing_dates([dt.date(2025, 6, 1)]) == []
+
+    def test_prev_mean(self):
+        from fao56_core import prev_mean
+        v = [1, 2, 3, 4, 5, 6, 7, 8, None]
+        assert prev_mean(v, 8) == pytest.approx(sum(range(2, 9)) / 7)
+        assert prev_mean(v, 0) is None and prev_mean([None, 4], 2) == 4
+
+    def test_multi_fills_eto_with_7day_mean(self):
+        from cropwater_multi import compute_water_balance
+        recs = [dict(date=f"2026-05-{i + 1:02d}", rain=0, PM=e) for i, e in enumerate([2, 3, 4, 5, 6, 7, 8, None])]
+        r = compute_water_balance(recs, 120.0, 60.0)
+        assert r[7]["filled"] and r[7]["ETo_wb"] == pytest.approx(5.0)
+        assert r[7]["Dr"] == pytest.approx(35 + 5.0)
+
+    def test_station_workbook_marks_and_fills(self, tmp_path):
+        import openpyxl
+        from cropwater_station import build_workbook
+        from fao56_core import load_crop_library
+        here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        crop = load_crop_library(os.path.join(here, "crops_library.csv"), os.path.join(here, "crops_overrides.csv"))["apple"]
+        full = dict(maxTa=25.0, minTa=12.0, avgTa=18.0, avgRhm=60.0, minRhm=35.0, avgWs=2.0, avgPv=12.0, avgTd=9.0,
+                    avgPa=1000.0, sumGsr=20.0, sumSsHr=8.0, sumLrgEv=4.0, sumRn=None)
+        rows = [dict(tm=dt.date(2026, 5, d), **full) for d in range(1, 10) if d != 9]
+        rows += [dict(tm=dt.date(2026, 5, 11), **full)]          # 5/10 빠짐
+        rows[7] = dict(tm=dt.date(2026, 5, 8), minTa=10.3, minRhm=33, sumLrgEv=3.3)   # 5/8 빈 칸 (5/9 빠짐)
+        p = dict(lat=37.9, elev=77.7, anem=10.0, fetch=100.0, stn="101", start="20260501", end="20260511",
+                 meta_source="MANUAL", crop=crop, bud_date=dt.date(2026, 4, 1), irrig={})
+        n, path = build_workbook(rows, p, str(tmp_path / "wb.xlsx"))
+        assert n == 11                                           # 5/9·5/10 행 추가
+        wb = openpyxl.load_workbook(path)
+        raw, calc = wb["원데이터"], wb["계산과정"]
+        assert raw["O9"].value == "결측 — 관측 빈 칸" and raw["O10"].value.startswith("결측 — 행 없음")
+        assert raw["O11"].value.startswith("결측 — 행 없음") and raw["O12"].value is None
+        assert calc["U9"].value == "=AVERAGE(U2:U8)" and calc["U10"].value == "=AVERAGE(U3:U9)"
+        assert calc["C9"].value is None and calc["X9"].value is None     # 입력 없는 날은 중간값·증발접시 비움
+        assert calc["U12"].value.startswith("=(0.408")                  # 관측 있는 날은 PM 수식
+        assert wb["결과요약"]["B26"].value == "=COUNTA(원데이터!O2:O12)"

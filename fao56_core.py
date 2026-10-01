@@ -123,6 +123,23 @@ def kc_of_date(day_ordinal, start_ordinal, L_ini, L_dev, L_mid, L_late,
         return kc_mid + (kc_end - kc_mid) * (d - L_ini - L_dev - L_mid + 1) / L_late
     return 0.0
 
+# ── 관측 결측일 (이슈 #20, 2026-09-30 결정) ─────────────────
+# 01-Cycle은 예보 자료가 없으므로, 빠진 날짜의 행을 넣고 '결측'으로 표시한 뒤
+# ETo = 앞 7일 ETo 평균, 강수 = 0 으로 물수지를 이어 간다.
+FILL_DAYS = 7
+
+def missing_dates(dates):
+    """날짜 목록의 첫날~끝날 사이에 빠진 날짜(오름차순). 끝날 뒤(아직 발표 전인 날)는 넣지 않는다."""
+    ds = sorted(set(dates))
+    out = []
+    for a, b in zip(ds, ds[1:]):
+        out += [a + dt.timedelta(days=k) for k in range(1, (b - a).days)]
+    return out
+
+def prev_mean(vals, i, n=FILL_DAYS):
+    """vals[i] 앞 n개 값(None 제외)의 평균. 앞에 값이 없으면 None."""
+    w = [v for v in vals[max(0, i - n):i] if v is not None]
+    return sum(w) / len(w) if w else None
 # ── 공통 유틸 ──
 def num(x):
     """문자열/None을 안전하게 float로. 결측 표기('-', '', None 등)는 None 반환."""
