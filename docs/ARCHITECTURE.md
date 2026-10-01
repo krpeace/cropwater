@@ -222,11 +222,11 @@ p = {
 G2 = 설정!DR0          ← 초기 고갈량 (첫 행)
 G3 = L2                ← 전일 Dr,i (이후 행)
 
-H  = MAX(F-G, 0)       [식88] DP
-I  = MAX(G-F, 0)       강수 후 고갈량
-J  = IF(I<=RAW, 1, (TAW-I)/(TAW-RAW))   [식84] Ks
+H  = MAX(F-K-G, 0)     [식88 원식] DP = P − ETc_adj − Dr,i-1
+I  = MAX(G-F, 0)       강수 후 고갈량 (참고용)
+J  = IF(G<=RAW, 1, (TAW-G)/(TAW-RAW))   [식84] Ks (전날 끝 고갈량 Dr,i-1)
 K  = J*E               ETc_adj = Ks × ETc
-L  = MIN(I+K, TAW)     [식85] Dr,i
+L  = MIN(MAX(G-F+K+H, 0), TAW)   [식85·86] Dr,i
 M  = IF(L>=RAW,"●","") 관수필요 판정
 N  = IF(M="●",L,0)     필요 순관수량 In
 O  = IF(N>0,N/Ea,0)    필요 총관수량 Ig
@@ -248,19 +248,15 @@ ASOS 원자료 → ETo_PM·ETo_pan 계산.
 ### ◆ compute_water_balance(recs, taw, raw)
 
 FAO-56 식(85) 일별 Dr 추적. 기준작물(Kc=1) · 무관수 가정.
-`recs`에 `{DP, Peff, Dr, Ks, irr, In}` 필드를 추가하여 반환합니다.
+`recs`에 `{DP, Peff, Dr, Ks, irr, In}` 필드를 추가하여 반환합니다. 하루 계산은 `fao56_core.wb_step`이 맡습니다.
 
 ```python
-Dr = 0.0
-for rec in recs:
-    P        = rec["rain"]
-    ETo      = rec["PM"]
-    DP       = max(P - Dr, 0)
-    Dr_after = max(Dr - P, 0)
-    Ks       = 1.0 if Dr_after <= raw \
-               else (taw - Dr_after) / (taw - raw)
-    Dr       = min(Dr_after + Ks * ETo, taw)
-    rec["Dr"] = Dr
+def wb_step(dr_prev, P, etc, taw, raw):
+    ks      = 1.0 if dr_prev <= raw else max((taw - dr_prev) / (taw - raw), 0.0)  # 식84: 전날 끝 Dr
+    etc_adj = ks * etc
+    dp      = max(P - etc_adj - dr_prev, 0.0)                                      # 식88 원식
+    dr      = min(max(dr_prev - P + etc_adj + dp, 0.0), taw)                       # 식85·86
+    return ks, etc_adj, dp, dr
 ```
 
 ### ◆ aggregate_monthly(recs)
