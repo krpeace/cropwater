@@ -4,7 +4,7 @@ tests/test_fao56.py — FAO-56 핵심 계산 단위 테스트
 검증 기준:
   - FAO-56 식(11) svp, 식(21) Ra, 식(47) wind_2m
   - FAO-56 식(6) ETo Penman-Monteith
-  - FAO-56 식(82)(83)(84)(88) TAW·RAW·Ks·DP 물수지
+  - FAO-56 식(82)(83)(84)(85)(88) TAW·RAW·Ks·DP 물수지 (식88은 FAO-56 원식: 당일 ETc를 뺌)
   - FAO-56 그림(25) Kc 생육단계 보간
   - 실증값: 춘천(ASOS 101) 2026-04-01 실측 기반
 
@@ -147,13 +147,46 @@ class TestWaterBalance:
              else max(0.0, (self.TAW - Dr) / (self.TAW - self.RAW))
         assert abs(Ks - expected_Ks) < ABS_TOL_KS
 
-    def test_dp_excess_rain(self):
-        """DP = max(P − Dr, 0): 강수 50mm, Dr=20mm → DP=30mm  [식(88)]"""
-        assert abs(max(50.0 - 20.0, 0) - 30.0) < 0.01
+    def _wb(self, rain, eto):
+        from cropwater_multi import compute_water_balance
+        recs = [dict(date=f"2026-05-{i + 1:02d}", rain=p, PM=e) for i, (p, e) in enumerate(zip(rain, eto))]
+        return compute_water_balance(recs, self.TAW, self.RAW)
 
-    def test_dp_small_rain(self):
+    def test_dp_eq88_subtracts_same_day_etc(self):
+        """[식(88) FAO-56 원식] DP = P − ETc − Dr,i-1: Dr 20mm에 비 50mm, ETc 5mm → DP 25mm, Dr 0"""
+        r = self._wb([0, 0, 0, 0, 50], [5, 5, 5, 5, 5])
+        assert r[3]["Dr"] == pytest.approx(20.0)
+        assert r[4]["DP"] == pytest.approx(25.0)      # 간이식 max(P − Dr, 0)이면 30
+        assert r[4]["Dr"] == pytest.approx(0.0)       # 간이식이면 ETc만큼(5) 남음
+        assert r[4]["Peff"] == pytest.approx(25.0)
+
+    def test_dp_zero_when_rain_within_deficit_plus_etc(self):
+        """비가 고갈량 + 당일 ETc보다 적으면 DP = 0, Dr = Dr,i-1 − P + ETc = 20 − 22 + 5 = 3"""
+        r = self._wb([0, 0, 0, 0, 22], [5, 5, 5, 5, 5])
+        assert r[4]["DP"] == 0.0 and r[4]["Dr"] == pytest.approx(3.0)
+
+    def test_small_rain_below_deficit(self):
         """강수 < 고갈량이면 DP = 0"""
-        assert max(10.0 - 40.0, 0) == 0.0
+        r = self._wb([0, 0, 0, 0, 10], [5, 5, 5, 5, 5])
+        assert r[4]["DP"] == 0.0 and r[4]["Dr"] == pytest.approx(15.0)
+
+    def test_ks_from_previous_day_depletion(self):
+        """[Ks 판단 시점] 전날 끝 고갈량 Dr,i-1로 정함: Dr 90에 비 40 → Ks = (120−90)/60 = 0.5 (비 뒤 고갈량 50으로 정하면 1.0)"""
+        from fao56_core import wb_step
+        ks, etc_adj, dp, dr = wb_step(90.0, 40.0, 5.0, self.TAW, self.RAW)
+        assert ks == pytest.approx(0.5)
+        assert etc_adj == pytest.approx(2.5)
+        assert dp == 0.0 and dr == pytest.approx(52.5)
+
+    def test_wb_step_matches_compute_water_balance(self):
+        """cropwater_multi.compute_water_balance는 wb_step과 같은 값을 냄(무관수, Kc=1)"""
+        from fao56_core import wb_step
+        rain, eto = [0, 0, 30, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 12, 0], [5.0] * 17
+        r = self._wb(rain, eto)
+        dr = 0.0
+        for rec, p, e in zip(r, rain, eto):
+            ks, _, dp, dr = wb_step(dr, p, e, self.TAW, self.RAW)
+            assert rec["Dr"] == pytest.approx(round(dr, 2)) and rec["DP"] == pytest.approx(round(dp, 2))
 
     def test_dr_lower_bound(self):
         """Dr은 0 미만이 될 수 없음"""
@@ -247,3 +280,23 @@ class TestMissingDays:
         assert calc["C9"].value is None and calc["X9"].value is None     # 입력 없는 날은 중간값·증발접시 비움
         assert calc["U12"].value.startswith("=(0.408")                  # 관측 있는 날은 PM 수식
         assert wb["결과요약"]["B26"].value == "=COUNTA(원데이터!O2:O12)"
+
+
+class TestStationWaterBalanceSheet:
+    """cropwater_station.build_workbook 물수지 시트 수식: Ks는 Dr,i-1(G열), DP는 식(88) 원식"""
+
+    def test_formulas(self, tmp_path):
+        import openpyxl
+        from cropwater_station import build_workbook
+        from fao56_core import load_crop_library
+        here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        crop = load_crop_library(os.path.join(here, "crops_library.csv"), os.path.join(here, "crops_overrides.csv"))["apple"]
+        rows = [dict(tm=dt.date(2026, 5, d), maxTa=25.0, minTa=12.0, avgTa=18.0, avgRhm=60.0, minRhm=35.0, avgWs=2.0,
+                     avgPv=12.0, avgTd=9.0, avgPa=1000.0, sumGsr=20.0, sumSsHr=8.0, sumLrgEv=4.0, sumRn=None) for d in (1, 2, 3)]
+        p = dict(lat=37.9, elev=77.7, anem=10.0, fetch=100.0, stn="101", start="20260501", end="20260503",
+                 meta_source="MANUAL", crop=crop, bud_date=dt.date(2026, 4, 1))
+        _, path = build_workbook(rows, p, str(tmp_path / "wb.xlsx"))
+        ws = openpyxl.load_workbook(path)["물수지"]
+        assert ws["J3"].value.startswith("=IF(G3<=")          # Ks ← 전날 끝 고갈량
+        assert ws["H3"].value == "=MAX(F3-K3-G3, 0)"          # DP 식(88) 원식
+        assert ws["L3"].value.startswith("=MIN(MAX(G3-F3+K3+H3, 0)")

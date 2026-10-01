@@ -123,6 +123,23 @@ def kc_of_date(day_ordinal, start_ordinal, L_ini, L_dev, L_mid, L_late,
         return kc_mid + (kc_end - kc_mid) * (d - L_ini - L_dev - L_mid + 1) / L_late
     return 0.0
 
+# ── FAO-56 일별 근권 물수지 (Ch.8) ──
+def wb_step(dr_prev, P, etc, taw, raw):
+    """하루 물수지 [식84·85·86·88]. 지표유출 RO = 0, 모관상승 CR = 0.
+       dr_prev : 전날 끝 근권 고갈량 Dr,i-1 (mm)
+       P       : 강수량 (mm)
+       etc     : 스트레스 보정 전 ETc = Kc × ETo (mm)
+       Ks는 전날 끝 고갈량 Dr,i-1로 정한다(FAO-56 원식).
+       반환: (Ks, ETc_adj, DP, Dr,i)"""
+    if dr_prev <= raw:
+        ks = 1.0
+    else:
+        ks = max((taw - dr_prev) / (taw - raw), 0.0) if taw > raw else 0.0
+    etc_adj = ks * etc
+    dp = max(P - etc_adj - dr_prev, 0.0)                                # [식88] 원식
+    dr = min(max(dr_prev - P + etc_adj + dp, 0.0), taw)                 # [식85·86]
+    return ks, etc_adj, dp, dr
+
 # ── 관측 결측일 (이슈 #20, 2026-09-30 결정) ─────────────────
 # 01-Cycle은 예보 자료가 없으므로, 빠진 날짜의 행을 넣고 '결측'으로 표시한 뒤
 # ETo = 앞 7일 ETo 평균, 강수 = 0 으로 물수지를 이어 간다.

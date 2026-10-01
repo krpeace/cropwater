@@ -440,11 +440,11 @@ def build_workbook(rows, p, out):
             5: f"=D{r}*C{r}",                         # ETc = ETo × Kc
             6: f"={S}!N{r}",                          # 강수량 P (원데이터 N열)
             7: f"={dr_prev}",                         # Dr,i-1
-            8: f"=MAX(F{r}-G{r}, 0)",                 # DP = max(P - Dr,i-1, 0) [식88 간이]
-            9: f"=MAX(G{r}-F{r}, 0)",                 # Dr_비후 = max(Dr,i-1 - P, 0)
-            10: f"=IF(I{r}<={_RAW}, 1, ({_TAW}-I{r})/({_TAW}-{_RAW}))",  # Ks [식84]
+            8: f"=MAX(F{r}-K{r}-G{r}, 0)",            # DP = max(P − ETc_adj − Dr,i-1, 0) [식88 FAO-56 원식]
+            9: f"=MAX(G{r}-F{r}, 0)",                 # Dr_비후 = max(Dr,i-1 − P, 0) (참고용, Ks 판단에는 쓰지 않음)
+            10: f"=IF(G{r}<={_RAW}, 1, ({_TAW}-G{r})/({_TAW}-{_RAW}))",  # Ks [식84] — 전날 끝 고갈량 Dr,i-1로 판단
             11: f"=J{r}*E{r}",                        # ETc_adj = Ks × ETc
-            12: f"=MIN(I{r}+K{r}, {_TAW})",           # Dr,i [식85] 0≤Dr≤TAW
+            12: f"=MIN(MAX(G{r}-F{r}+K{r}+H{r}, 0), {_TAW})",  # Dr,i [식85·86] = Dr,i-1 − P + ETc_adj + DP, 0≤Dr≤TAW
             13: f'=IF(L{r}>={_RAW},"●","")',          # 관수필요 판정
             14: f'=IF(M{r}="●",L{r},0)',              # 순관수 In = Dr(근권 전량보충)
             15: f'=IF(N{r}>0,N{r}/{_EA},0)',           # 총관수 Ig = In/Ea
@@ -487,9 +487,10 @@ def build_workbook(rows, p, out):
          ("물수지 근거 (FAO-56 Ch.8)","",True),
          ("TAW [식82]","총유효수분 TAW = 1000·(θFC−θWP)·Zr (mm). θFC/θWP는 FAO-56 Table 19, Zr은 Table 22 기준값."),
          ("RAW [식83]","쉽게이용가능수분 RAW = p·TAW (mm). Dr이 RAW에 도달하면 작물이 스트레스를 받기 시작. p는 Table 22 기준값."),
-         ("Ks [식84]","수분스트레스계수. Dr≤RAW이면 Ks=1(무스트레스). Dr>RAW이면 Ks=(TAW−Dr)/(TAW−RAW), 0~1 범위."),
+         ("Ks [식84]","수분스트레스계수. 전날 끝 고갈량 Dr,i-1≤RAW이면 Ks=1(무스트레스). Dr,i-1>RAW이면 Ks=(TAW−Dr,i-1)/(TAW−RAW), 0~1 범위."),
          ("Dr [식85]","일별 근권 고갈량. Dr,i = Dr,i-1 − P + ETc,adj + DP. 범위: 0 ≤ Dr ≤ TAW."),
-         ("DP [식88]","심층침투. DP = max(P − Dr,i-1, 0). 강수가 현재 고갈량보다 많으면 근권을 넘쳐 아래로 배수."),
+         ("DP [식88]","심층침투(FAO-56 원식). DP = max(P − ETc,adj − Dr,i-1, 0). 그날 증발산으로 쓰고 근권을 포장용수량까지 채우고도 남는 비만 아래로 배수. 큰 비가 오면 Dr,i = 0."),
+         ("Ks 판단 시점","전날 끝 고갈량 Dr,i-1로 Ks를 정함(FAO-56 원식). 이전에는 그날 비가 먼저 들어간 뒤의 고갈량을 썼으며, 고갈량이 RAW를 넘은 상태에서 비가 온 날에만 차이가 남. Dr비후 열은 참고용."),
          ("ETc_adj [식81]","스트레스 보정 후 증발산. ETc_adj = Ks · Kc · ETo. Ks<1이면 실제 소비량이 잠재 ETc보다 줄어듦."),
          ("관수필요 판정","Dr,i ≥ RAW이면 관수 필요(●). 무관수(자연강우만) 가정이므로 ● 이후에도 Dr 리셋 없이 계속 누적됨. 실측 관수 데이터는 다음 버전에서 식(85)에 직접 반영 예정."),
          ("필요 순관수량 In","net irrigation depth. 관수필요(●) 시점의 Dr 값. 근권을 포장용수량(Dr=0)까지 보충하는 데 필요한 순수량(mm). 이론적 필요량이며 실측 관수량이 아님."),
