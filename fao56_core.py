@@ -124,11 +124,12 @@ def kc_of_date(day_ordinal, start_ordinal, L_ini, L_dev, L_mid, L_late,
     return 0.0
 
 # ── FAO-56 일별 근권 물수지 (Ch.8) ──
-def wb_step(dr_prev, P, etc, taw, raw):
+def wb_step(dr_prev, P, etc, taw, raw, irr_net=0.0):
     """하루 물수지 [식84·85·86·88]. 지표유출 RO = 0, 모관상승 CR = 0.
        dr_prev : 전날 끝 근권 고갈량 Dr,i-1 (mm)
        P       : 강수량 (mm)
        etc     : 스트레스 보정 전 ETc = Kc × ETo (mm)
+       irr_net : 근권에 들어간 순관수량 (mm) = 공급 관수량 × 관수효율 Ea
        Ks는 전날 끝 고갈량 Dr,i-1로 정한다(FAO-56 원식).
        반환: (Ks, ETc_adj, DP, Dr,i)"""
     if dr_prev <= raw:
@@ -136,9 +137,43 @@ def wb_step(dr_prev, P, etc, taw, raw):
     else:
         ks = max((taw - dr_prev) / (taw - raw), 0.0) if taw > raw else 0.0
     etc_adj = ks * etc
-    dp = max(P - etc_adj - dr_prev, 0.0)                                # [식88] 원식
-    dr = min(max(dr_prev - P + etc_adj + dp, 0.0), taw)                 # [식85·86]
+    dp = max(P + irr_net - etc_adj - dr_prev, 0.0)                      # [식88] 원식
+    dr = min(max(dr_prev - P - irr_net + etc_adj + dp, 0.0), taw)       # [식85·86]
     return ks, etc_adj, dp, dr
+
+def load_irrigation_log(path):
+    """관수 기록 CSV → {datetime.date: 공급 관수량(mm)}.
+       머리행에 날짜 열(날짜/일자/date)과 관수량 열(관수량·mm·amount가 들어간 이름)이 있어야 한다. 메모 등 다른 열은 무시.
+       날짜: YYYY-MM-DD, YYYY.MM.DD, YYYY/MM/DD, YYYYMMDD. 같은 날이 여러 줄이면 합한다. 빈 관수량은 건너뛴다.
+       관수량은 공급량(mm)이며 물수지에는 × 관수효율(Ea)로 들어간다. 1 mm = 10a당 1톤."""
+    enc = "utf-8-sig"
+    try:
+        open(path, encoding=enc).read()
+    except UnicodeDecodeError:
+        enc = "cp949"
+    out = {}
+    with open(path, encoding=enc, newline="") as f:
+        rd = csv.reader(f)
+        head = [h.strip().lower() for h in next(rd)]
+        di = next((i for i, h in enumerate(head) if h in ("날짜", "일자", "date")), None)
+        ai = next((i for i, h in enumerate(head) if i != di and ("관수량" in h or "mm" in h or "amount" in h)), None)
+        if di is None or ai is None:
+            raise ValueError(f"{path}: 머리행에 날짜 열(날짜/일자/date)과 관수량 열(관수량_mm 등)이 필요합니다 → {head}")
+        for n, row in enumerate(rd, 2):
+            if len(row) <= max(di, ai) or not row[di].strip():
+                continue
+            s = row[di].strip().replace(".", "-").replace("/", "-")
+            try:
+                d = dt.datetime.strptime(s, "%Y%m%d" if s.isdigit() else "%Y-%m-%d").date()
+            except ValueError:
+                raise ValueError(f"{path} {n}행: 날짜 형식을 읽을 수 없습니다 → '{row[di]}'")
+            v = num(row[ai])
+            if v is None:
+                continue
+            if v < 0:
+                raise ValueError(f"{path} {n}행: 관수량이 음수입니다 → {v}")
+            out[d] = out.get(d, 0.0) + v
+    return out
 
 # ── 관측 결측일 (이슈 #20, 2026-09-30 결정) ─────────────────
 # 01-Cycle은 예보 자료가 없으므로, 빠진 날짜의 행을 넣고 '결측'으로 표시한 뒤
