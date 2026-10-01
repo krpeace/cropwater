@@ -36,7 +36,8 @@ from fao56_core import (svp, slope_svp as slope, extra_radiation as extra_rad,
                          daylight_hours as daylight, wind_2m as wind2m,
                          kp_class_a as kp_pan, eto_penman_monteith as eto_pm,
                          num, fetch_station_table, fetch_asos, load_apikeys,
-                         safe_save, load_station_backup, save_station_backup)
+                         safe_save, load_station_backup, save_station_backup,
+                         missing_dates, prev_mean, FILL_DAYS)
 
 # ── 주요 지점 예시 ──
 MAJOR=[(90,"속초"),(101,"춘천"),(93,"북춘천"),(105,"강릉"),(114,"원주"),(216,"태백"),(212,"홍천"),
@@ -77,30 +78,40 @@ def compute_station(rows, lat, elev, anem, fetch=100.0):
         if ev is not None and RH: rec["pan"]=kp_pan(u2,RH,fetch)*ev
         else: miss_ev+=1
         out.append(rec)
+    # 관측 결측일(#20): 첫날~끝날 사이에 빠진 날짜를 넣음(ETo 없음 → 물수지에서 앞 7일 평균, 강수 0)
+    have = [dt.datetime.strptime(r["date"], "%Y-%m-%d").date() for r in out]
+    for d in missing_dates(have):
+        out.append(dict(date=d.strftime("%Y-%m-%d"), PM=None, pan=None, Epan=None, rain=0.0))
+    out.sort(key=lambda r: r["date"])
     return out, miss_si, miss_ev
 
 
 def compute_water_balance(recs, taw, raw):
     """FAO-56 식(85) 일별 근권 물수지 추적.
        기준작물(Kc=1) · 무관수(자연강우만) 가정.
-       recs 리스트에 DP, Peff, Dr, Ks, irr, In 필드를 추가하여 반환.
+       관측 결측일(ETo 없음, #20)은 앞 7일 ETo 평균으로 채우고 rec["filled"]=True, 강수는 관측값(없으면 0).
+       recs 리스트에 DP, Peff, Dr, Ks, irr, In, ETo_wb, filled 필드를 추가하여 반환.
     """
     Dr = 0.0  # 초기 고갈량 = 0 (포장용수량 출발)
+    used = []                                        # 물수지에 쓴 ETo(채운 값 포함)
     for rec in recs:
         P   = rec.get("rain") or 0
-        ETo = rec.get("PM")   # None이면 결측
+        ETo = rec.get("PM")
+        rec["filled"] = ETo is None
+        if ETo is None:
+            ETo = prev_mean(used, len(used), FILL_DAYS)
+            if ETo is None:
+                ETo = 0.0                            # 기간 첫날부터 결측 — 앞 자료 없음
+        used.append(ETo)
+        rec["ETo_wb"] = round(ETo, 3)
 
         # DP [식88]: 강수가 현재 고갈량 초과분 → 심층침투
         DP = max(P - Dr, 0)
         Dr_after = max(Dr - P, 0)   # 강수 후 고갈량
 
-        # Ks [식84]: 스트레스 계수
-        if ETo is not None:
-            Ks = 1.0 if Dr_after <= raw else max((taw - Dr_after) / (taw - raw), 0.0)
-            ETc_adj = Ks * ETo   # Kc=1(기준작물)
-        else:
-            Ks = None
-            ETc_adj = 0.0        # 결측일은 보수적으로 ETc=0 처리
+        # Ks [식84]: 스트레스 계수 (결측일은 앞 7일 평균 ETo로 채운 값 사용)
+        Ks = 1.0 if Dr_after <= raw else max((taw - Dr_after) / (taw - raw), 0.0)
+        ETc_adj = Ks * ETo   # Kc=1(기준작물)
 
         # Dr,i [식85]: 0 ≤ Dr ≤ TAW
         Dr_end = min(Dr_after + ETc_adj, taw)
@@ -606,6 +617,7 @@ def main():
         ("DP [식88]","심층침투 = max(P − Dr,i-1, 0). 강수가 고갈량 초과분은 근권 아래로 손실."),
         ("Ks [식84]","수분스트레스계수. Dr≤RAW이면 1.0, 초과 시 (TAW−Dr)/(TAW−RAW)."),
         ("Dr [식85]","일별 근권 고갈량. Dr,i = Dr,i-1 − P + ETc_adj(=Ks×ETo) + DP. 0 ≤ Dr ≤ TAW."),
+        ("관측 결측일","날짜가 빠졌거나 ETo 입력이 빈 날은 물수지에서 ETo = 앞 7일 평균, 강수는 관측값(없으면 0)으로 이어 감(#20). ETo 월합계·지점 비교에는 관측이 있는 날만 씀."),
         ("관수필요","Dr ≥ RAW이면 ●. Dr 미리셋(무관수 가정이므로 관수 후 초기화 없음)."),
         ("필요 순관수량 In","net irrigation depth. 관수필요 시점 Dr 값. 이론적 필요량, 실측값 아님."),
         ("파라미터 변경","--zr, --fc, --wp, --pdep 로 토양 조건 변경 가능. 작물별 Zr은 FAO-56 Table 22 참조."),
