@@ -233,7 +233,7 @@ def test_soil_status_wet_and_dry():
     assert s(0.3, 60, kc=1.0) == "토양 수분 충분" and s(29.9, 60, kc=1.0) == "토양 수분 충분"          # < RAW ÷ 2 (포장용수량과 RAW의 중간)
     assert s(30.0, 60, kc=1.0) == "주의" and s(60.0, 60, kc=1.0) == "관수 필요"
     assert s(6.1, 60, kc=1.0, wet_caution=6.0) == "안전" and s(6.0, 60, kc=1.0, wet_caution=6.0) == "안전"   # 기준을 낮추면 '안전'이 다시 나옴
-    assert s(0.0, 60, kc=0.0) == "안전" and s(0.0, 60, kc=None) == "안전"                    # 휴면기(Kc 0)는 과습 판정 안 함
+    assert s(0.0, 60, kc=0.0) == "휴면기" and s(70.0, 60, kc=0.0) == "휴면기" and s(0.0, 60, kc=None) == "안전"   # 휴면기(Kc 0)
     assert s(0.0, 60, kc=1.0, observed=False) == "안전"                                     # 예보로 진행한 날은 판정 안 함
     assert s(10.0, 60, kc=1.0, wet_caution=12.0) == "토양 수분 충분" and s(np.nan, 60, kc=1.0) == "자료 없음"
 

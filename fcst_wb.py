@@ -683,6 +683,8 @@ def soil_status(dr, raw, kc=None, observed=True, wet_caution=None):
     if dr is None or pd.isna(dr):
         return "자료 없음"
     wc = raw * WET_CAUTION_RATIO if wet_caution is None else wet_caution
+    if kc is not None and not pd.isna(kc) and kc <= 0:
+        return "휴면기"                                    # 생육기가 아님(Kc 0): ETc 0이라 Dr이 움직이지 않음 → 판정하지 않음
     if observed and kc is not None and not pd.isna(kc) and kc > 0:
         if dr < WET_ZERO_MM:
             return "과습 경고"
