@@ -665,7 +665,7 @@ def _service_main(ws, sv, W, fr, tl):
     r_dr, r_raw, r_pct, r_st, r_dp = r, r + 1, r + 2, r + 3, r + 4
     H(ws, r_dr, 1, f'="전날(" & TEXT({sel}-1,"m/d") & ") 끝 고갈량 Dr"', LIGHT, white=False)
     C(ws, r_dr, 2, f'=IF({cell["p0"]}="","자료 없음",{ix("c", "p0")})', F1, bold=True)
-    C(ws, r_dr, 3, (f'=IF({cell["p0"]}="","","mm — "&IF({ix("obs", "p0")}=1,"관측 물수지",{ix("kind", "p0")}&", 범위 "'
+    C(ws, r_dr, 3, (f'=IF({cell["p0"]}="","","mm — "&IF({ix("obs", "p0")}=1,"관측 물수지","예보 ("&{ix("lead", "p0")}&"), 범위 "'
                     f'&TEXT({ix("l", "p0")},"0")&" ~ "&TEXT({ix("e", "p0")},"0")&" mm"))'), left=True, size=9, color="555555")
     H(ws, r_raw, 1, "RAW (이만큼 빠지면 관수)", LIGHT, white=False); C(ws, r_raw, 2, f"={raw}", F1, bold=True)
     T(ws, r_raw, 3, "mm", size=9, color="555555")
@@ -692,7 +692,7 @@ def _service_main(ws, sv, W, fr, tl):
     if k0:                                               # 저녁 발표: 주 지표는 조회일 다음 날부터 → 조회일 끝 Dr을 함께 보임
         H(ws, r, 1, f'="조회일(" & TEXT({sel},"m/d") & ") 끝 예상 Dr"', LIGHT, white=False)
         C(ws, r, 2, f'=IF({cell["pt"]}="","자료 없음",{ix("c", "pt")})', F1, bold=True)
-        C(ws, r, 3, f'=IF({cell["pt"]}="","","mm — "&IF({ix("obs", "pt")}=1,"관측 물수지",{ix("kind", "pt")})&" (저녁 발표의 출발)")',
+        C(ws, r, 3, f'=IF({cell["pt"]}="","","mm — "&IF({ix("obs", "pt")}=1,"관측 물수지","예보 ("&{ix("lead", "pt")}&")")&" (저녁 발표의 출발)")',
           left=True, size=9, color="555555")
         r += 1
     for rr in range(r_dr, r):
