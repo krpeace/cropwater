@@ -665,7 +665,7 @@ def _service_main(ws, sv, W, fr, tl):
     r_dr, r_raw, r_pct, r_st, r_dp = r, r + 1, r + 2, r + 3, r + 4
     H(ws, r_dr, 1, f'="전날(" & TEXT({sel}-1,"m/d") & ") 끝 고갈량 Dr"', LIGHT, white=False)
     C(ws, r_dr, 2, f'=IF({cell["p0"]}="","자료 없음",{ix("c", "p0")})', F1, bold=True)
-    C(ws, r_dr, 3, (f'=IF({cell["p0"]}="","","mm — "&IF({ix("obs", "p0")}=1,"관측 물수지","예보 ("&{ix("lead", "p0")}&"), 범위 "'
+    C(ws, r_dr, 3, (f'=IF({cell["p0"]}="","","mm — "&IF({ix("obs", "p0")}=1,"관측 물수지","예보 ("&{ix("lead", "p0")}&"), 예상 폭 "'
                     f'&TEXT({ix("l", "p0")},"0")&" ~ "&TEXT({ix("e", "p0")},"0")&" mm"))'), left=True, size=9, color="555555")
     H(ws, r_raw, 1, "RAW (이만큼 빠지면 관수)", LIGHT, white=False); C(ws, r_raw, 2, f"={raw}", F1, bold=True)
     T(ws, r_raw, 3, "mm", size=9, color="555555")
@@ -736,7 +736,8 @@ def _service_main(ws, sv, W, fr, tl):
     for p in ("p3", "p2", "p1"):
         f = f'IF({ix("c", p)}>={raw},{ix("c", p)},{f})'
     C(ws, r, 2, f'=IF(OR({cell["ps"]}="",{cell["p3"]}=""),"",IF({ix("c", "ps")}>={raw},{ix("c", "ps")},{f}))', F1, bold=True)
-    C(ws, r, 3, f"=IF(B{r}=\"\",\"\",\"순 \"&TEXT(B{r},\"0\")&\" mm → 공급 \"&TEXT(B{r}/{W['EA']},\"0\")&\" mm (10a당 \"&TEXT(B{r}/{W['EA']},\"0\")&\"톤)\")")
+    C(ws, r, 3, f"=IF(B{r}=\"\",\"\",\"순 \"&TEXT(B{r},\"0\")&\" mm → 공급 \"&TEXT(B{r}/{W['EA']},\"0\")&\" mm (10a당 \"&TEXT(B{r}/{W['EA']},\"0\")&\"톤)\")", left=True)
+    ws.merge_cells(start_row=r, start_column=3, end_row=r, end_column=8)
     r += 2
     # ── 날짜별 전망 ──
     _sec(ws, r, "날짜별 전망 (마지막 날은 참고)", 13); r += 1
