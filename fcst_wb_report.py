@@ -9,7 +9,9 @@ fcst_wb_report.py — 02-Cycle 4단계(G4) 엑셀: 예보 물수지 검증 엑�
   - 수식: 관측 물수지(관수 규칙 시나리오 스위치 포함), 발표별 8개 경로의 고갈량, 관수 필요 판정, 발표별 예상일·판정·범위 적중, 요약 지표
   - 설정 시트의 토양 파라미터·판정 기준 고갈량·평가 대상일 수를 바꾸면 다시 계산된다
 [서비스 엑셀] build_service_workbook(sv, out)
-  시트: 관수 전망 / 예보 물수지 / 관측 물수지 / 오차표 / 편향 점검 / 설정 / 방법
+  시트: 관수 전망 / 예보 물수지 / 관측 물수지 / 날짜별 / 오차표 / 편향 점검 / 설정 / 방법
+  - 관수 전망의 조회일(노란 칸)을 바꾸면 그 날짜의 토양 상태·앞으로 3일을 '날짜별' 시트에서 찾아온다(없는 날짜는 '자료 없음')
+  - 상태에 과습 경고·과습 주의(관측 물수지 기준, 예보는 쓰지 않음)
   - 관측 물수지의 관수량(노란 칸)을 적으면 어제 끝 Dr과 예보 물수지·관수 필요 예상일이 바로 바뀐다
 
 근거: docs/THEORY.md 6·9장, docs/VALIDATION.md G4, 해석: docs/RESULTS_GUIDE.md
@@ -22,13 +24,17 @@ from openpyxl import Workbook
 from openpyxl.formatting.rule import FormulaRule
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter as CL
+from openpyxl.worksheet.datavalidation import DataValidation
 
 from fao56_core import safe_save
 from fcst_report import BLUE, BORDER, BROWN, C, DATE, DTM, F2, FONT, GREEN, H, LIGHT, T, YEL, _wrap_text, widths
-from fcst_wb import MAIN_DAYS, NEED_CATS, PATHS
+from fcst_wb import MAIN_DAYS, NEED_CATS, PATHS, WET_CAUTION_RATIO
 
 GREY = "8A8F87"; REF_FILL = "F2F2F2"; NEED_FILL = "F4C7B8"; WARN_FILL = "FBEED2"; OK_FILL = "D8EAD3"
 F1 = "0.0"
+WETW_FILL = "9DC3E6"; WETC_FILL = "DDEBF7"      # 과습 경고·과습 주의 바탕
+TL = "날짜별"                                   # 조회용 시트(관측 물수지 + 예보 물수지를 날짜순으로 이음)
+SEL = "'관수 전망'!$B$5"                        # 조회일 칸
 
 
 def _v(x):
@@ -87,7 +93,7 @@ def _settings(wb, soil, extra, W, title):
         elif key == "RAW":
             val = f"={W['P']}*{W['TAW']}"
         elif isinstance(val, str) and val.startswith("=RAW"):
-            val = f"={W['RAW']}"
+            val = f"={W['RAW']}{val[4:]}"                # '=RAW' 또는 '=RAW*0.1' 같은 식
         C(ws, r, 2, val, fmt, fill=(YEL if edit else None))
         x = ws.cell(r, 3, note); x.font = Font(name=FONT, size=9, color="555555"); x.border = BORDER
         x.alignment = Alignment("left", "center", wrap_text=True)
@@ -466,7 +472,10 @@ def build_service_workbook(sv, out):
     wb.remove(wb.active)
     ws_main = wb.create_sheet("관수 전망")
     W = {"_irr_log": {pd.Timestamp(k): v for k, v in (sv.get("irrig") or {}).items()}}
-    _settings(wb, soil, [], W, f"관수 전망 — ASOS {sv['stn']} {sv.get('stn_name', '')} · {ol['run']:%Y-%m-%d %H시} {ol['run_name']} 발표")
+    extra = [("WETC", "과습 주의 기준 Dr (mm)", f"=RAW*{WET_CAUTION_RATIO}", F1, True,
+              "관측 물수지의 끝 고갈량 Dr이 이 값 이하이면 '과습 주의'(Dr = 0이면 '과습 경고'). 기본 = RAW의 "
+              f"{WET_CAUTION_RATIO:.0%} — 포장용수량에 닿은 뒤 하루 이틀 치 증발산만 빠진 상태. 숫자로 바꿔 쓸 수 있음(참고 지표, 검증 전)")]
+    _settings(wb, soil, extra, W, f"관수 전망 — ASOS {sv['stn']} {sv.get('stn_name', '')} · {ol['run']:%Y-%m-%d %H시} {ol['run_name']} 발표")
     ws_owb, owb_dates, owb_dr, owb_last = sheet_owb(wb, sv["owb"], W, name="관측 물수지",
                                                     note="노란 칸(관수 기록)에 준 관수량(공급 mm, 10a당 1톤 = 1 mm)을 적으면 어제 끝 Dr과 전망이 다시 계산됩니다")
     # 출발 = 관측 마지막 날 끝 Dr (보통 어제. 어제 관측이 아직 없으면 그 전날 — 어제는 '예보 물수지'에서 예보 하루로 진행)
@@ -474,12 +483,77 @@ def build_service_workbook(sv, out):
     W["_owb_row"] = {x: i + 2 for i, x in enumerate(dates)}
     owb_last = W["_owb_row"].get(pd.Timestamp(ol["prev"]), owb_last)
     fr = _sheet_service_wb(wb, sv, W, owb_last)
+    tl = _sheet_timeline(wb, sv, owb_last, fr)
     sheet_errtab(wb, dict(err=sv["err"], err_path=sv.get("err_path"), year=None))
     _sheet_bias(wb, sv)
-    _service_main(ws_main, sv, W, fr, owb_last)
+    _service_main(ws_main, sv, W, fr, tl)
     _method_service(wb, sv)
-    _order(wb, ["관수 전망", "예보 물수지", "관측 물수지", "오차표", "편향 점검", "설정", "방법"])
+    _order(wb, ["관수 전망", "예보 물수지", "관측 물수지", TL, "오차표", "편향 점검", "설정", "방법"])
     return safe_save(wb, out)
+
+
+# 날짜별 시트의 열 ('관수 전망'의 날짜 조회 수식이 찾아오는 곳)
+TL_HEAD = ["날짜", "구분", "선행일", "ETo (mm)", "Kc", "ETc (mm)", "ETc 오차 ± (mm)", "강수 (mm)\n관측·예보", "강수확률\n(최대)",
+           "기대 강수 (mm)", "순관수 I (mm)", "심층침투 DP\n(mm)", "Dr 중심 (mm)", "Dr 빠르면 (mm)", "Dr 늦으면 (mm)", "관측 물수지\n(1/0)"]
+TL_COL = dict(date="A", kind="B", lead="C", eto="D", kc="E", etc="F", err="G", rain="H", pop="I", rain_exp="J", irr="K", dp="L",
+              c="M", e="N", l="O", obs="P")
+TL_CELLS = ["sel", "D", "k0", "p0", "pt", "p1", "p2", "p3", "p4", "pw", "ps"]      # 날짜별!S1.. 찾기 칸
+
+
+def _sheet_timeline(wb, sv, owb_last, fr):
+    """날짜별 시트: 관측 물수지(첫날~관측 마지막 날) 뒤에 예보 물수지(관측 전·그날·대상일)를 날짜순으로 이은 표(모두 참조 수식).
+       '관수 전망'의 조회일(노란 칸)이 이 표에서 그 날짜의 행을 찾는다.
+       반환 dict(last, rng(열 키) → 범위, cell[찾기 칸 이름] → 주소, ix(열 키, 찾기 칸) → INDEX 식, k0, D, first, end)"""
+    ol = sv["outlook"]
+    ws = wb.create_sheet(TL)
+    for c, h in enumerate(TL_HEAD, 1):
+        H(ws, 1, c, h, GREEN if c <= 3 else (BLUE if c <= 12 else BROWN))
+    o = "'관측 물수지'"
+    for i in range(2, owb_last + 1):                     # 관측 물수지와 같은 행 번호
+        vals = [(f"={o}!A{i}", DATE), ("관측 물수지", None),
+                (f'=IF({o}!D{i}="관측","관측",IF({o}!D{i}="예보","예보로 채움","ETo 없음"))', None),
+                (f"={o}!C{i}", F2), (f"={o}!B{i}", "0.000"), (f"={o}!E{i}", F2), ('=""', F2), (f"={o}!F{i}", F1), ('=""', "0%"),
+                (f"={o}!F{i}", F1), (f"={o}!H{i}", F1), (f"={o}!L{i}", F1), (f"={o}!M{i}", F1), (f"={o}!M{i}", F1),
+                (f"={o}!M{i}", F1), (1, None)]
+        for c, (v, f) in enumerate(vals, 1):
+            C(ws, i, c, v, f)
+    f_ = "'예보 물수지'"
+    r = owb_last + 1
+    for rr in range(3, fr["last"] + 1):                  # 예보 물수지: 관측 전(있으면)·그날(저녁)·대상일
+        blank = lambda col: f'=IF({f_}!{col}{rr}="","",{f_}!{col}{rr})'
+        vals = [(f"={f_}!B{rr}", DATE), (f"={f_}!A{rr}", None), (f"={f_}!C{rr}", None), (f"={f_}!D{rr}", F2), (f"={f_}!E{rr}", "0.000"),
+                (f"={f_}!F{rr}", F2), (blank("G"), F2), (f"={f_}!I{rr}", F1), (blank("J"), "0%"), (f"={f_}!K{rr}", F1),
+                ('=""', F1), ('=""', F1), (f"={f_}!L{rr}", F1), (f"={f_}!M{rr}", F1), (f"={f_}!N{rr}", F1), (0, None)]
+        for c, (v, f) in enumerate(vals, 1):
+            C(ws, r, c, v, f, fill=REF_FILL)
+        r += 1
+    last = r - 1
+    rng = lambda k: f"{TL}!${TL_COL[k]}$2:${TL_COL[k]}${last}"
+    D = pd.Timestamp(ol["run"]).normalize()
+    k0 = 1 if ol["run_name"] == "저녁" else 0             # 주 지표 첫날 = 조회일 + k0
+    pos = lambda d: f'=IFERROR(MATCH({d},$A$2:$A${last},0),"")'
+    helpers = [("조회일 ('관수 전망' 노란 칸)", f"={SEL}", DATE),
+               ("발표일", D.to_pydatetime(), DATE),
+               ("주 지표 첫날 = 조회일 +", k0, None),
+               ("전날 행 (조회일 − 1)", pos("$S$1-1"), None),
+               ("조회일 행", pos("$S$1"), None),
+               ("대상일 1 행", pos("$S$1+$S$3"), None),
+               ("대상일 2 행", pos("$S$1+$S$3+1"), None),
+               ("대상일 3 행", pos("$S$1+$S$3+2"), None),
+               ("대상일 4 행 (참고)", pos("$S$1+$S$3+3"), None),
+               # 과습 판정 행: 전날이 관측 물수지면 그 행, 전날이 '관측 전'(예보로 먼저 진행한 날)이면 관측 마지막 날. 그 밖(예보)은 판정 안 함
+               ("과습 판정 행 (관측 물수지)", f'=IF($S$4="","",IF(INDEX($P$2:$P${last},$S$4)=1,$S$4,'
+                                       f'IF(LEFT(INDEX($B$2:$B${last},$S$4),4)="관측 전",{owb_last - 1},"")))', None),
+               ("주 지표 출발 행", '=IF($S$3=0,$S$4,$S$5)', None)]
+    for i, (k, v, f) in enumerate(helpers, 1):
+        H(ws, i, 18, k, LIGHT, white=False); C(ws, i, 19, v, f)
+    T(ws, len(helpers) + 2, 18, "행 = 이 표에서 위에서 몇 번째 날짜인지(없으면 빈 칸 → '자료 없음'). 이 칸들은 바꾸지 마세요", size=9, color="555555")
+    ws.freeze_panes = "B2"
+    widths(ws, {"A": 11, "B": 22, "C": 12, "D": 8, "E": 7, "F": 8, "G": 9, "H": 10, "I": 8, "J": 9, "K": 9, "L": 10, "M": 10,
+                "N": 10, "O": 10, "P": 9, "Q": 3, "R": 28, "S": 13})
+    cell = {n: f"{TL}!$S${i}" for i, n in enumerate(TL_CELLS, 1)}
+    return dict(last=last, rng=rng, cell=cell, k0=k0, D=D, first=pd.Timestamp(sv["owb"].date.iloc[0]),
+                end=pd.Timestamp(ol["days"].target.max()), ix=lambda k, p: f"INDEX({rng(k)},{cell[p]})")
 
 
 def _sheet_service_wb(wb, sv, W, owb_last):
@@ -547,27 +621,22 @@ def _sheet_service_wb(wb, sv, W, owb_last):
     return info
 
 
-def _need_text(W, fr, col):
-    """예상일 문자열 수식: 출발 ≥ RAW면 '지금 필요', 주 지표 기간에 처음 Dr ≥ RAW가 되는 날, 참고 날, 없으면 '3일 안에 없음'"""
-    main = fr["main"]
-    parts = []
-    for rr in main:
-        parts.append((f"'예보 물수지'!{col}{rr}>={W['RAW']}",
-                      f"TEXT('예보 물수지'!B{rr},\"m/d\")&\" (\"&'예보 물수지'!C{rr}&\")\""))
-    tail = "\"3일 안에 없음\""
-    if fr["ref"]:
-        rr = fr["ref"]
-        tail = f"IF('예보 물수지'!{col}{rr}>={W['RAW']},TEXT('예보 물수지'!B{rr},\"m/d\")&\" (\"&'예보 물수지'!C{rr}&\", 참고)\",\"3일 안에 없음\")"
-    f = tail
-    for cond, val in reversed(parts):
-        f = f"IF({cond},{val},{f})"
-    start = f"'예보 물수지'!{col}{fr['pre']}" if fr["pre"] else f"'예보 물수지'!{col}2"
-    return f"=IF({start}>={W['RAW']},\"지금 필요\",{f})"
+def _need_text(W, tl, k):
+    """예상일 문자열 수식(조회일 기준): 출발 ≥ RAW면 '지금 필요', 주 지표 3일에 처음 Dr ≥ RAW가 되는 날, 참고 날, 없으면 '3일 안에 없음'.
+       k: 경로 열(c 중심 / e 빠르면 / l 늦으면). 자료가 없는 날짜면 '자료 없음'"""
+    ix, cell, raw = tl["ix"], tl["cell"], W["RAW"]
+    lab = lambda p, tail="": f'TEXT({ix("date", p)},"m/d")&" ("&{ix("lead", p)}&"{tail})"'
+    f = f'IF({cell["p4"]}="","3일 안에 없음",IF({ix(k, "p4")}>={raw},{lab("p4", ", 참고")},"3일 안에 없음"))'
+    for p in ("p3", "p2", "p1"):
+        f = f"IF({ix(k, p)}>={raw},{lab(p)},{f})"
+    return f'=IF(OR({cell["ps"]}="",{cell["p3"]}=""),"자료 없음",IF({ix(k, "ps")}>={raw},"지금 필요",{f}))'
 
 
-def _service_main(ws, sv, W, fr, owb_last):
+def _service_main(ws, sv, W, fr, tl):
+    """관수 전망 시트. 조회일(노란 칸, 기본 = 발표일)을 바꾸면 그 날짜의 '지금 토양 상태'와 '앞으로 3일'을 날짜별 시트에서 찾아온다"""
     ol, soil = sv["outlook"], sv["soil"]
     rn, run = ol["run_name"], ol["run"]
+    ix, cell, raw, D, k0 = tl["ix"], tl["cell"], W["RAW"], tl["D"], tl["k0"]
     T(ws, 1, 1, f"관수 전망 — {sv.get('stn_name', '')}(ASOS {sv['stn']}) · 사과 · {run:%Y-%m-%d %H시} {rn} 발표", size=14, bold=True, color=GREEN)
     ops = sv.get("ops")
     method = (ops or {}).get("rs_method") or sv.get("main", "S4")
@@ -575,84 +644,120 @@ def _service_main(ws, sv, W, fr, owb_last):
                 f"대상일 {'오늘~D+3' if rn == '아침' else '내일~D+4'} (마지막 날은 참고)", size=9, color="555555")
     if ops and (ops.get("backup") or "S3" in (ops.get("rs_method") or "") or ops.get("obs_prev") != "관측"):
         T(ws, 3, 1, "※ " + " · ".join(ops_flags(ops, rn)), size=9, bold=True, color="A8681B")
+    # ── 날짜 선택 ──
     r = 4
-    _sec(ws, r, "지금 토양 상태", 8); r += 1
-    prev = pd.Timestamp(ol["prev"])
-    lab0 = ("어제 끝 고갈량 Dr (관측 물수지)" if not ol.get("lag_days") else f"관측 마지막 날({prev:%m/%d}) 끝 고갈량 Dr")
-    items = [(lab0, f"='관측 물수지'!M{owb_last}", F1, "mm"),
-             ("RAW (이만큼 빠지면 관수)", f"={W['RAW']}", F1, "mm"),
-             ("RAW 대비", f"=B{r}/B{r + 1}", "0%", ""),
-             ("상태", f'=IF(B{r}>=B{r + 1},"관수 필요",IF(B{r}>=0.5*B{r + 1},"주의","안전"))', None, "")]
-    for k, f, fmt, unit in items:
-        H(ws, r, 1, k, LIGHT, white=False); C(ws, r, 2, f, fmt, bold=True); T(ws, r, 3, unit, size=9, color="555555")
+    _sec(ws, r, "날짜 선택", 8); r += 1
+    H(ws, r, 1, "조회일 (노란 칸: 목록에서 고르거나 날짜 입력)", LIGHT, white=False)
+    C(ws, r, 2, D.to_pydatetime(), DATE, bold=True, size=12, fill=YEL)
+    dv = DataValidation(type="list", formula1=f"={TL}!$A$3:$A${tl['last']}", allow_blank=False, showErrorMessage=False)
+    dv.prompt, dv.promptTitle, dv.showInputMessage = (f"기본 = 발표일 {D:%Y-%m-%d}. 조회할 수 있는 날짜: {tl['first'] + pd.Timedelta(days=1):%Y-%m-%d} ~ "
+                                                     f"{tl['end']:%Y-%m-%d}"), "조회일", True
+    ws.add_data_validation(dv); dv.add(ws.cell(r, 2))
+    sel = f"$B${r}"
+    C(ws, r, 3, (f'=IF({cell["p0"]}="","자료 없음 — 조회할 수 있는 날짜: {tl["first"] + pd.Timedelta(days=1):%Y-%m-%d} ~ {tl["end"]:%Y-%m-%d}",'
+                 f'IF({sel}={cell["D"]},"발표일 (이 발표의 관수 전망)",IF({sel}<{cell["D"]},'
+                 f'"지난 날짜 — 관측 물수지 결과 (발표일 뒤로 넘어가는 날은 이 발표의 예보)","발표일 뒤 — 이 발표의 예보로 진행한 값")))'),
+      left=True, bold=True, color="A8681B")
+    ws.merge_cells(start_row=r, start_column=3, end_row=r, end_column=8)
+    r += 2
+    # ── 지금 토양 상태 (조회일 전날 끝) ──
+    _sec(ws, r, "지금 토양 상태 (조회일 전날 끝)", 8); r += 1
+    r_dr, r_raw, r_pct, r_st, r_dp = r, r + 1, r + 2, r + 3, r + 4
+    H(ws, r_dr, 1, f'="전날(" & TEXT({sel}-1,"m/d") & ") 끝 고갈량 Dr"', LIGHT, white=False)
+    C(ws, r_dr, 2, f'=IF({cell["p0"]}="","자료 없음",{ix("c", "p0")})', F1, bold=True)
+    C(ws, r_dr, 3, (f'=IF({cell["p0"]}="","","mm — "&IF({ix("obs", "p0")}=1,"관측 물수지",{ix("kind", "p0")}&", 범위 "'
+                    f'&TEXT({ix("l", "p0")},"0")&" ~ "&TEXT({ix("e", "p0")},"0")&" mm"))'), left=True, size=9, color="555555")
+    H(ws, r_raw, 1, "RAW (이만큼 빠지면 관수)", LIGHT, white=False); C(ws, r_raw, 2, f"={raw}", F1, bold=True)
+    T(ws, r_raw, 3, "mm", size=9, color="555555")
+    H(ws, r_pct, 1, "RAW 대비", LIGHT, white=False); C(ws, r_pct, 2, f'=IF(ISNUMBER(B{r_dr}),B{r_dr}/B{r_raw},"")', "0%", bold=True)
+    # 과습(관측 물수지만, 생육기 Kc > 0): 경고 = 끝 Dr 0(0.05 mm 미만), 주의 = 끝 Dr ≤ 과습 주의 기준(설정). 그 밖은 관수 쪽 상태
+    wet_dr = ix("c", "pw")
+    grow = f'{ix("kc", "pw")}>0'
+    dry = f'IF(B{r_dr}>=B{r_raw},"관수 필요",IF(B{r_dr}>=0.5*B{r_raw},"주의","안전"))'
+    H(ws, r_st, 1, "상태", LIGHT, white=False)
+    C(ws, r_st, 2, (f'=IF({cell["p0"]}="","자료 없음",IF({cell["pw"]}="",{dry},IF(AND({grow},ROUND({wet_dr},1)<=0),"과습 경고",'
+                    f'IF(AND({grow},{wet_dr}<={W["WETC"]}),"과습 주의",{dry}))))'), None, bold=True, size=12)
+    C(ws, r_st, 3, (f'=IF(OR(B{r_st}="과습 경고",B{r_st}="과습 주의"),"관측 물수지 "&TEXT({ix("date", "pw")},"m/d")&" 끝 Dr "'
+                    f'&TEXT({wet_dr},"0.0")&" mm (과습 주의 기준 "&TEXT({W["WETC"]},"0.0")&" mm 이하) — 관수를 미루세요","")'),
+      left=True, size=9, color="1F4E79")
+    for txt, fill in (("과습 경고", WETW_FILL), ("과습 주의", WETC_FILL), ("관수 필요", NEED_FILL), ("주의", WARN_FILL), ("안전", OK_FILL)):
+        ws.conditional_formatting.add(f"B{r_st}", FormulaRule(formula=[f'$B${r_st}="{txt}"'], fill=PatternFill("solid", bgColor=fill, fgColor=fill)))
+    wd = ix("date", "pw")
+    H(ws, r_dp, 1, "심층침투 DP 최근 7일 합 (관측 물수지)", LIGHT, white=False)
+    C(ws, r_dp, 2, (f'=IF({cell["pw"]}="","",SUMIFS({tl["rng"]("dp")},{tl["rng"]("date")},">="&({wd}-6),{tl["rng"]("date")},"<="&{wd},'
+                    f'{tl["rng"]("obs")},1))'), F1)
+    C(ws, r_dp, 3, (f'=IF({cell["pw"]}="","","mm — 그중 끝 Dr이 0인 날 "&COUNTIFS({tl["rng"]("c")},"<0.05",{tl["rng"]("date")},">="&({wd}-6),'
+                    f'{tl["rng"]("date")},"<="&{wd},{tl["rng"]("obs")},1)&"일 (근권 아래로 빠진 비·관수)")'), left=True, size=9, color="555555")
+    r = r_dp + 1
+    if k0:                                               # 저녁 발표: 주 지표는 조회일 다음 날부터 → 조회일 끝 Dr을 함께 보임
+        H(ws, r, 1, f'="조회일(" & TEXT({sel},"m/d") & ") 끝 예상 Dr"', LIGHT, white=False)
+        C(ws, r, 2, f'=IF({cell["pt"]}="","자료 없음",{ix("c", "pt")})', F1, bold=True)
+        C(ws, r, 3, f'=IF({cell["pt"]}="","","mm — "&IF({ix("obs", "pt")}=1,"관측 물수지",{ix("kind", "pt")})&" (저녁 발표의 출발)")',
+          left=True, size=9, color="555555")
         r += 1
-    for rr, kind, day in fr.get("pres", []):
-        D = pd.Timestamp(run).normalize()
-        if kind == "관측 전":
-            nm = "어제" if day == D - pd.Timedelta(days=1) else f"{day:%m/%d}"
-            H(ws, r, 1, f"{nm} 끝 예상 Dr (관측 전 — 아침 예보)", LIGHT, white=False)
-            note = "mm (ASOS 관측이 아직 없어 예보 하루로 진행, 범위 포함)"
-        else:
-            H(ws, r, 1, "오늘 끝 예상 Dr (아침 D+0 예보)", LIGHT, white=False)
-            note = "mm (저녁 발표의 출발)"
-        C(ws, r, 2, f"='예보 물수지'!L{rr}", F1, bold=True); T(ws, r, 3, note, size=9, color="555555")
-        r += 1
+    for rr in range(r_dr, r):
+        if rr not in (r_raw, r_pct):
+            ws.merge_cells(start_row=rr, start_column=3, end_row=rr, end_column=8)
     r += 1
-    _sec(ws, r, "★ 앞으로 3일 — 주 지표", 8); r += 1
-    m0, m1 = fr["main"][0], fr["main"][-1]
+    # ── 앞으로 3일 ──
+    _sec(ws, r, "★ 앞으로 3일 — 주 지표 (조회일" + (" 다음 날" if k0 else "") + "부터)", 8); r += 1
+    ok3 = f'OR({cell["p1"]}="",{cell["p3"]}="")'
+    sum3 = lambda k: f'SUM({ix(k, "p1")}:{ix(k, "p3")})'
     H(ws, r, 1, "작물 증발산 ETc 3일 합", LIGHT, white=False)
-    C(ws, r, 2, f"=SUM('예보 물수지'!F{m0}:F{m1})", F1, bold=True, size=14)
-    C(ws, r, 3, f"=\"± \"&TEXT(B{r}*D{r},\"0.0\")&\" mm\"", None, bold=True)
+    C(ws, r, 2, f'=IF({ok3},"자료 없음",{sum3("etc")})', F1, bold=True, size=14)
+    C(ws, r, 3, (f'=IF(ISNUMBER(B{r}),IF({sel}={cell["D"]},"± "&TEXT(B{r}*D{r},"0.0")&" mm",IF({ix("obs", "p3")}=1,"(관측값)","(± 는 발표일만)")),"")'),
+      None, bold=True)
     C(ws, r, 4, _v(ol["cum3"][3]), "0%", fill=LIGHT)
-    T(ws, r, 5, f"← 상대 오차 r₃: 같은 달·같은 발표의 3일 누적 예보 ETo 오차 (RMSE ÷ 관측 평균, {ol['cum3'][2]}, 오차표 시트)",
+    T(ws, r, 5, f"← 상대 오차 r₃: 같은 달·같은 발표의 3일 누적 예보 ETo 오차 (RMSE ÷ 관측 평균, {ol['cum3'][2]}, 오차표 시트). 발표일 조회에만 적용",
       size=9, color="555555")
     r += 1
-    H(ws, r, 1, "예보 강수 3일 합", LIGHT, white=False)
-    C(ws, r, 2, f"=SUM('예보 물수지'!I{m0}:I{m1})", F1); C(ws, r, 3, f"=\"(기대 강수 \"&TEXT(SUM('예보 물수지'!K{m0}:K{m1}),\"0.0\")&\" mm)\"")
+    H(ws, r, 1, "강수 3일 합 (예보 · 지난 날짜는 관측)", LIGHT, white=False)
+    C(ws, r, 2, f'=IF({ok3},"자료 없음",{sum3("rain")})', F1)
+    C(ws, r, 3, f'=IF({ok3},"","(기대 강수 "&TEXT({sum3("rain_exp")},"0.0")&" mm)")')
     T(ws, r, 5, "기대 강수 = 시각별 예보 강수량 × 강수확률. 예보 강수량은 관측보다 많게 나오는 경향이 있음(두 해 검증, 처음 이틀 1.1~2.1배)",
       size=9, color="555555")
     r += 1
     H(ws, r, 1, "관수 필요 예상일 (관수하지 않으면)", LIGHT, white=False)
-    C(ws, r, 2, _need_text(W, fr, "L"), None, bold=True, size=13, fill=NEED_FILL)
+    C(ws, r, 2, _need_text(W, tl, "c"), None, bold=True, size=13, fill=NEED_FILL)
     ws.merge_cells(start_row=r, start_column=2, end_row=r, end_column=3)
     r += 1
     H(ws, r, 1, "  빠르면 (비가 오지 않으면)", LIGHT, white=False)
-    C(ws, r, 2, _need_text(W, fr, "M"), None); ws.merge_cells(start_row=r, start_column=2, end_row=r, end_column=3)
+    C(ws, r, 2, _need_text(W, tl, "e"), None); ws.merge_cells(start_row=r, start_column=2, end_row=r, end_column=3)
     r += 1
     H(ws, r, 1, "  늦으면 (예보 비가 모두 오면)", LIGHT, white=False)
-    C(ws, r, 2, _need_text(W, fr, "N"), None); ws.merge_cells(start_row=r, start_column=2, end_row=r, end_column=3)
+    C(ws, r, 2, _need_text(W, tl, "l"), None); ws.merge_cells(start_row=r, start_column=2, end_row=r, end_column=3)
     r += 1
     H(ws, r, 1, "권장 관수량 (예상일에 포장용수량까지)", LIGHT, white=False)
     # 예상일의 중심 Dr: 출발이 이미 필요면 출발 값, 아니면 주 지표 기간에 처음 Dr ≥ RAW인 날의 값
     f = "\"\""
-    for rr in reversed(fr["main"]):
-        f = f"IF('예보 물수지'!L{rr}>={W['RAW']},'예보 물수지'!L{rr},{f})"
-    start = f"'예보 물수지'!L{fr['pre']}" if fr["pre"] else "'예보 물수지'!L2"
-    C(ws, r, 2, f"=IF({start}>={W['RAW']},{start},{f})", F1, bold=True)
+    for p in ("p3", "p2", "p1"):
+        f = f'IF({ix("c", p)}>={raw},{ix("c", p)},{f})'
+    C(ws, r, 2, f'=IF(OR({cell["ps"]}="",{cell["p3"]}=""),"",IF({ix("c", "ps")}>={raw},{ix("c", "ps")},{f}))', F1, bold=True)
     C(ws, r, 3, f"=IF(B{r}=\"\",\"\",\"순 \"&TEXT(B{r},\"0\")&\" mm → 공급 \"&TEXT(B{r}/{W['EA']},\"0\")&\" mm (10a당 \"&TEXT(B{r}/{W['EA']},\"0\")&\"톤)\")")
     r += 2
-    _sec(ws, r, "날짜별 전망 (마지막 날은 참고)", 12); r += 1
-    hd = ["날짜", "선행일", "구분", "ETo (mm)", "Kc", "ETc (mm)", "± 오차 (mm)", "예보 강수 (mm)", "강수확률", "기대 강수 (mm)",
-          "예상 Dr 중심 (mm)", "범위: 늦으면~빠르면 (mm)", "상태"]
+    # ── 날짜별 전망 ──
+    _sec(ws, r, "날짜별 전망 (마지막 날은 참고)", 13); r += 1
+    hd = ["날짜", "선행일", "구분", "ETo (mm)", "Kc", "ETc (mm)", "± 오차 (mm)", "강수 (mm)", "강수확률", "기대 강수 (mm)",
+          "Dr 중심 (mm)", "범위: 늦으면~빠르면 (mm)", "상태"]
     for c, h in enumerate(hd, 1):
         H(ws, r, c, h)
     r += 1
-    pre_kind = {rr: k for rr, k, _ in fr.get("pres", [])}
-    for rr in [x for x, _, _ in fr.get("pres", [])] + fr["main"] + ([fr["ref"]] if fr["ref"] else []):
-        grey = rr == fr["ref"] or rr in pre_kind
+    for p in (["pt"] if k0 else []) + ["p1", "p2", "p3", "p4"]:
+        grey = p in ("pt", "p4")
         clr, fill = (GREY, REF_FILL) if grey else ("1A1A1A", None)
-        src = lambda c: f"='예보 물수지'!{c}{rr}"
-        C(ws, r, 1, src("B"), DATE, color=clr, fill=fill); C(ws, r, 2, src("C"), color=clr, fill=fill)
-        C(ws, r, 3, "참고" if rr == fr["ref"] else ({"관측 전": "관측 전(예보)", "그날": "오늘(예보)"}.get(pre_kind.get(rr), "주 지표")),
-          color=clr, fill=fill)
-        C(ws, r, 4, src("D"), F2, color=clr, fill=fill); C(ws, r, 5, src("E"), "0.00", color=clr, fill=fill)
-        C(ws, r, 6, src("F"), F1, color=clr, fill=fill, bold=not grey)
-        C(ws, r, 7, f"=IF('예보 물수지'!G{rr}=\"\",\"\",'예보 물수지'!G{rr})", F1, color=clr, fill=fill)
-        C(ws, r, 8, src("I"), F1, color=clr, fill=fill); C(ws, r, 9, src("J"), "0%", color=clr, fill=fill)
-        C(ws, r, 10, src("K"), F1, color=clr, fill=fill)
-        C(ws, r, 11, src("L"), F1, color=clr, fill=fill, bold=not grey)
-        C(ws, r, 12, f"=TEXT('예보 물수지'!N{rr},\"0\")&\" ~ \"&TEXT('예보 물수지'!M{rr},\"0\")", None, color=clr, fill=fill)
-        C(ws, r, 13, src("O"), color=clr, fill=fill)
+        g = lambda k, p=p: f'=IF({cell[p]}="","",{ix(k, p)})'
+        C(ws, r, 1, f'=IF({cell[p]}="","자료 없음",{ix("date", p)})', DATE, color=clr, fill=fill)
+        C(ws, r, 2, g("lead"), color=clr, fill=fill); C(ws, r, 3, g("kind"), color=clr, fill=fill)
+        C(ws, r, 4, g("eto"), F2, color=clr, fill=fill); C(ws, r, 5, g("kc"), "0.00", color=clr, fill=fill)
+        C(ws, r, 6, g("etc"), F1, color=clr, fill=fill, bold=not grey); C(ws, r, 7, g("err"), F1, color=clr, fill=fill)
+        C(ws, r, 8, g("rain"), F1, color=clr, fill=fill); C(ws, r, 9, g("pop"), "0%", color=clr, fill=fill)
+        C(ws, r, 10, g("rain_exp"), F1, color=clr, fill=fill)
+        C(ws, r, 11, g("c"), F1, color=clr, fill=fill, bold=not grey)
+        C(ws, r, 12, f'=IF({cell[p]}="","",IF({ix("obs", p)}=1,"관측",TEXT({ix("l", p)},"0")&" ~ "&TEXT({ix("e", p)},"0")))', None, color=clr, fill=fill)
+        # 상태: 관측 물수지 날(지난 날짜)에는 과습도 판정, 예보 날은 관수 쪽만
+        C(ws, r, 13, (f'=IF({cell[p]}="","",IF(AND({ix("obs", p)}=1,{ix("kc", p)}>0,ROUND({ix("c", p)},1)<=0),"과습 경고",'
+                      f'IF(AND({ix("obs", p)}=1,{ix("kc", p)}>0,{ix("c", p)}<={W["WETC"]}),"과습 주의",'
+                      f'IF({ix("c", p)}>={raw},"관수 필요",IF({ix("c", p)}>={raw}*0.5,"주의","안전")))))'), color=clr, fill=fill)
         r += 1
     r += 1
     if ops:
@@ -671,13 +776,17 @@ def _service_main(ws, sv, W, fr, owb_last):
             r += 1
         r += 1
     notes = ["읽는 법: 고갈량 Dr은 포장용수량에서 빠진 물(mm)입니다. Dr이 RAW에 닿으면 관수가 필요합니다. 예상 Dr은 '관수하지 않을 때'의 값입니다.",
+             "날짜 선택: 조회일(노란 칸)을 바꾸면 그 날짜의 토양 상태와 그 뒤 3일을 보여 줍니다. 지난 날짜는 관측 물수지 결과(실제 비·관수 기록 반영), "
+             "발표일 뒤는 이 발표의 예보입니다. 자료가 없는 날짜는 '자료 없음'으로 나옵니다. 발표일로 되돌리려면 발표일을 다시 고르세요.",
+             "과습: 관측 물수지에서 전날 끝 Dr이 0(포장용수량까지 참)이면 '과습 경고', 과습 주의 기준(설정 시트, 기본 RAW의 10%) 이하이면 '과습 주의'입니다. "
+             "예보는 쓰지 않고, 생육기(Kc > 0)에만 판정합니다. 전날 관측이 아직 없으면 관측 마지막 날 기준입니다. 배수 상태는 계산에 없는 참고 지표입니다.",
              "3일 합(주 지표)이 하루 값보다 믿을 만합니다(FAO-56 권고: 추정 일사로 계산한 ETo는 여러 날 합계로 쓰기). 마지막 날은 참고로만 보세요.",
              "범위: 빠르면 = 예보 비가 오지 않고 증발산이 예보보다 많을 때, 늦으면 = 예보 비가 모두 오고 증발산이 적을 때. 두 해 검증에서 실제 날짜가 '빠르면'보다 앞선 적은 없었습니다.",
              "관수를 했으면 '관측 물수지' 시트의 노란 칸에 적으세요. 어제 끝 Dr과 전망이 바로 다시 계산됩니다.",
              f"예보 ETo는 편향 보정을 하지 않습니다(#10). 월·선행일별 예보 오차는 '편향 점검' 시트에서 봅니다. {sv.get('bias_note', '')}"]
     for n_ in notes:
         r = _note(ws, r, n_, width=150)
-    widths(ws, {"A": 34, "B": 12, "C": 14, "D": 10, "E": 7, "F": 10, "G": 10, "H": 12, "I": 9, "J": 12, "K": 14, "L": 20, "M": 11})
+    widths(ws, {"A": 40, "B": 14, "C": 16, "D": 10, "E": 7, "F": 10, "G": 10, "H": 12, "I": 9, "J": 12, "K": 14, "L": 20, "M": 11})
     ws.sheet_view.showGridLines = False
 
 
@@ -744,6 +853,11 @@ def _method_service(wb, sv):
            ("주 지표", "처음 3일(아침 오늘~D+2, 저녁 내일~D+3) 합계. 마지막 날(아침 D+3·저녁 D+4)은 참고(#18)"),
            ("검증", "2025·2026년 과거 단기예보로 검증(VALIDATION G4): 예보 물수지 오차의 대부분은 강수 예보에서 오며, 범위(빠르면~늦으면)가 실제 관수 필요일을 대부분 포함"),
            ("한계", "예보 강수량은 관측보다 많게 나오는 경향이 있습니다(특히 장마철). 비 예보가 있으면 '빠르면'도 함께 보세요. 한 지점(춘천)·두 해 검증 결과입니다"),
+           ("날짜 선택", "'관수 전망'의 조회일(노란 칸, 기본 = 발표일)을 바꾸면 '날짜별' 시트(관측 물수지 + 예보 물수지를 날짜순으로 이은 표)에서 "
+                      "전날 끝 Dr과 그 뒤 3일을 찾아옵니다. 지난 날짜는 관측 물수지 결과이고 ± 오차·범위는 없습니다. 표에 없는 날짜는 '자료 없음'"),
+           ("과습", "관측 물수지의 전날 끝 Dr로만 판정(예보는 쓰지 않음). 과습 경고 = Dr 0(0.05 mm 미만 — 비·관수가 근권을 포장용수량까지 채움, "
+                  "넘친 물은 심층침투 DP), 과습 주의 = Dr ≤ 과습 주의 기준(설정 시트, 기본 RAW × 10%). 생육기(Kc > 0)에만 판정. "
+                  "전날 관측이 아직 없으면 관측 마지막 날 기준. FAO-56 물수지는 포장용수량보다 젖은 상태와 배수 속도를 다루지 않으므로 참고 지표(THEORY 9장)"),
            ("운영 규칙", "서비스 발표를 마감(발표 + 40분)까지 못 받으면 24시간 안의 직전 발표로 계산(그 발표 기준 선행일의 S4 계수·오차 r). "
                       "하늘상태·강수확률이 없으면 S3. 어제 ASOS 관측이 아직 없으면 어제를 어제 아침 발표 D+0 예보로 먼저 진행하고, "
                       "저녁 발표의 '그날'처럼 범위(빠르면·늦으면)에 그날의 불확실성을 담음(#12, VALIDATION G5)"),

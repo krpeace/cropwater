@@ -224,3 +224,133 @@ def test_excel_wb_formula_matches_wb_step(prev, p, etc):
     from fcst_wb_report import _wb_formula
     f = _wb_formula("PREV", "RAIN", "ETC", {"RAW": "60", "TAW": "120"})
     assert _eval(f, {"PREV": prev, "RAIN": p, "ETC": etc}) == pytest.approx(wb_step(prev, p, etc, 120.0, 60.0)[3])
+
+
+# ── 서비스 엑셀: 과습 상태·날짜 선택 ──────────────────────────────────────
+def test_soil_status_wet_and_dry():
+    s = W.soil_status
+    assert s(0.0, 60, kc=1.0) == "과습 경고" and s(8.9e-16, 60, kc=1.0) == "과습 경고"       # 끝 Dr 0 (부동소수 오차 포함)
+    assert s(0.3, 60, kc=1.0) == "과습 주의" and s(6.0, 60, kc=1.0) == "과습 주의"           # ≤ RAW × 10%
+    assert s(6.1, 60, kc=1.0) == "안전" and s(30.0, 60, kc=1.0) == "주의" and s(60.0, 60, kc=1.0) == "관수 필요"
+    assert s(0.0, 60, kc=0.0) == "안전" and s(0.0, 60, kc=None) == "안전"                    # 휴면기(Kc 0)는 과습 판정 안 함
+    assert s(0.0, 60, kc=1.0, observed=False) == "안전"                                     # 예보로 진행한 날은 판정 안 함
+    assert s(10.0, 60, kc=1.0, wet_caution=12.0) == "과습 주의" and s(np.nan, 60, kc=1.0) == "자료 없음"
+
+
+def _service_sv(D, name, rain_day=None, lag=False, days=20):
+    """서비스 엑셀용 최소 sv: ETo 5·Kc 1, rain_day에 큰 비(Dr → 0). lag면 전날 관측이 아직 없음"""
+    hour = 2 if name == "아침" else 17
+    start = TS(D) - pd.Timedelta(days=days)
+    rain = [200.0 if (rain_day and start + pd.Timedelta(days=i) == TS(rain_day)) else 0.0 for i in range(days)]
+    obs = _obs([start], [5.0] * days, rain)
+    ft = _ft(D)
+    if lag:
+        ft = pd.concat([_ft(str((TS(D) - pd.Timedelta(days=1)).date())), ft], ignore_index=True)
+        obs = obs[obs.date < TS(D) - pd.Timedelta(days=1)]
+        owb = W.observed_wb(obs, KP1, SOIL, fill=W.fill_from_forecast(ft), end=TS(D) - pd.Timedelta(days=1))
+    else:
+        owb = W.observed_wb(obs, KP1, SOIL)
+    last = W.last_observed(owb, TS(D))
+    ol = W.service_outlook(ft, owb, SOIL, None, name, TS(D) + pd.Timedelta(hours=hour),
+                           obs_last=last if last < TS(D) - pd.Timedelta(days=1) else None)
+    err = W.pooled_errors(W.load_error_rows(os.path.join(os.path.dirname(__file__), "..", "fcst_error_table.csv")), "101")
+    return dict(outlook=ol, owb=owb, soil=SOIL, err=err, stn="101", stn_name="춘천", grid="73_134", irrig={}, recent=None,
+                wet=W.wet_info(owb, ol["prev"], SOIL["raw"]))
+
+
+def test_wet_info_uses_last_observed_day():
+    sv = _service_sv("2026-06-10", "아침", rain_day="2026-06-09")
+    w = sv["wet"]
+    assert w["date"] == TS("2026-06-09") and w["status"] == "과습 경고" and w["dr"] == 0.0 and w["zero_days"] == 1
+    o = sv["owb"].set_index("date")
+    assert w["dp"] == pytest.approx(float(o.loc[TS("2026-06-09"), "DP"])) and w["dp"] > 100 and w["dp7"] == pytest.approx(w["dp"])
+    sv2 = _service_sv("2026-06-10", "아침", rain_day="2026-06-08")                           # 하루 지남: Dr 5 ≤ 6
+    assert sv2["wet"]["status"] == "과습 주의" and sv2["wet"]["dr"] == pytest.approx(5.0)
+    sv3 = _service_sv("2026-06-10", "아침", rain_day="2026-06-08", lag=True)                 # 6/9 관측 없음 → 6/8(관측 마지막 날) 기준
+    assert sv3["wet"]["date"] == TS("2026-06-08") and sv3["wet"]["status"] == "과습 경고"
+
+
+def test_service_workbook_date_picker_layout(tmp_path):
+    import openpyxl
+    from fcst_wb_report import SEL, TL, build_service_workbook
+    out = build_service_workbook(_service_sv("2026-06-10", "저녁", rain_day="2026-06-09"), str(tmp_path / "s.xlsx"))
+    wb = openpyxl.load_workbook(out)
+    assert wb.sheetnames[:4] == ["관수 전망", "예보 물수지", "관측 물수지", TL]
+    ws = wb["관수 전망"]
+    assert SEL == "'관수 전망'!$B$5" and ws["B5"].value == dt.datetime(2026, 6, 10)             # 기본 조회일 = 발표일
+    dv = ws.data_validations.dataValidation[0]
+    assert dv.type == "list" and str(dv.sqref) == "B5" and dv.formula1.startswith(f"={TL}!$A$3:") and not dv.showErrorMessage
+    labels = [ws.cell(r, 1).value for r in range(1, 30)]
+    assert labels.index("날짜 선택") < labels.index("지금 토양 상태 (조회일 전날 끝)")            # 날짜 선택이 토양 상태 위
+    st = labels.index("상태") + 1
+    assert "과습 경고" in ws.cell(st, 2).value and "과습 주의" in ws.cell(st, 2).value and "자료 없음" in ws.cell(st, 2).value
+    assert any(str(wb["설정"].cell(r, 1).value).startswith("과습 주의 기준") for r in range(2, 14))
+    tl = wb[TL]
+    assert tl["P2"].value == 1 and tl.cell(tl.max_row, 16).value == 0 and tl["S3"].value == 1    # 관측 행 → 예보 행, 저녁 = +1
+
+
+def _recalc(path, sel, tmp_path, tag):
+    """조회일을 바꿔 LibreOffice로 다시 계산한 '관수 전망' 시트 {A열 라벨: B열 값}과 통합 문서"""
+    import shutil
+    import subprocess
+    import openpyxl
+    wb = openpyxl.load_workbook(path)
+    if sel:
+        wb["관수 전망"]["B5"] = dt.datetime.strptime(sel, "%Y-%m-%d")
+    d = tmp_path / tag
+    d.mkdir()
+    wb.save(str(d / "in.xlsx"))
+    subprocess.run([shutil.which("soffice"), "--headless", "--convert-to", "xlsx", "--outdir", str(d / "o"), str(d / "in.xlsx")],
+                   capture_output=True, timeout=180)
+    wb = openpyxl.load_workbook(str(d / "o" / "in.xlsx"), data_only=True)
+    ws = wb["관수 전망"]
+    return {str(ws.cell(r, 1).value).strip(): ws.cell(r, 2).value for r in range(4, 30) if ws.cell(r, 1).value is not None}, wb
+
+
+@pytest.mark.skipif(__import__("shutil").which("soffice") is None, reason="LibreOffice 없음")
+def test_service_workbook_selected_date_matches_python(tmp_path):
+    from fcst_wb_report import build_service_workbook
+    sv = _service_sv("2026-06-10", "아침", rain_day="2026-06-06")
+    out = build_service_workbook(sv, str(tmp_path / "s.xlsx"))
+    o, ol = sv["owb"].set_index("date"), sv["outlook"]
+    key = lambda v, head: next(x for k, x in v.items() if k.startswith(head))
+    for sel in (None, "2026-06-07", "2026-06-08", "2026-06-09", "2026-06-12", "2026-05-30", "2026-07-15", "2026-05-21"):
+        v, wb = _recalc(out, sel, tmp_path, f"t{sel}")
+        assert not [c.value for ws in wb for row in ws.iter_rows() for c in row
+                    if isinstance(c.value, str) and c.value.startswith(("#", "Err:"))]
+        S = TS(sel or "2026-06-10")
+        prev = S - pd.Timedelta(days=1)
+        dr, st = key(v, "전날("), v["상태"]
+        if prev < o.index.min() or prev > ol["days"].target.max():         # 표에 없는 날짜
+            assert dr == "자료 없음" and st == "자료 없음"
+        elif prev in o.index:                                              # 지난 날짜·발표일: 관측 물수지
+            assert dr == pytest.approx(float(o.loc[prev, "Dr"]), abs=1e-9)
+            assert st == W.soil_status(float(o.loc[prev, "Dr"]), SOIL["raw"], 1.0)
+        else:                                                              # 발표일 뒤: 이 발표의 예보(과습 판정 안 함)
+            d = ol["days"].set_index("target")
+            assert dr == pytest.approx(float(d.loc[prev, "Dr_center"]), abs=1e-9)
+            assert st == W.soil_status(float(d.loc[prev, "Dr_center"]), SOIL["raw"], 1.0, observed=False)
+        etc3 = v["작물 증발산 ETc 3일 합"]
+        win = [S + pd.Timedelta(days=i) for i in range(3)]
+        etc = {**{t: float(o.loc[t, "ETc"]) for t in o.index}, **{t: 4.0 for t in ol["days"].target}}
+        assert etc3 == (pytest.approx(sum(etc[t] for t in win)) if all(t in etc for t in win) else "자료 없음")
+    v, _ = _recalc(out, None, tmp_path, "d")                               # 발표일: 기존 전망과 같은 값
+    assert key(v, "전날(") == pytest.approx(ol["dr_obs_prev"]) and v["작물 증발산 ETc 3일 합"] == pytest.approx(ol["cum3"][0])
+    assert v["상태"] == sv["wet"]["status"] == "안전"                        # 6/6 비 뒤 3일: Dr 15
+    assert _recalc(out, "2026-06-07", tmp_path, "w")[0]["상태"] == "과습 경고"
+    assert _recalc(out, "2026-06-08", tmp_path, "c")[0]["상태"] == "과습 주의"
+
+
+@pytest.mark.skipif(__import__("shutil").which("soffice") is None, reason="LibreOffice 없음")
+def test_service_workbook_obs_lag_wet_from_last_observed(tmp_path):
+    """전날 관측이 아직 없을 때: 전날 끝 Dr은 예보로 먼저 진행한 값, 과습은 관측 마지막 날 기준"""
+    from fcst_wb_report import build_service_workbook
+    sv = _service_sv("2026-06-10", "아침", rain_day="2026-06-08", lag=True)
+    v, _ = _recalc(build_service_workbook(sv, str(tmp_path / "s.xlsx")), None, tmp_path, "lag")
+    dr = next(x for k, x in v.items() if k.startswith("전날("))
+    assert dr == pytest.approx(sv["outlook"]["pre"][0]["Dr_center"]) and dr > 0
+    assert v["상태"] == sv["wet"]["status"] == "과습 경고"
+    ev = _service_sv("2026-06-10", "저녁", rain_day="2026-06-09")            # 저녁: 주 지표는 조회일 다음 날부터
+    v, _ = _recalc(build_service_workbook(ev, str(tmp_path / "e.xlsx")), None, tmp_path, "ev")
+    assert v["상태"] == "과습 경고" and v["작물 증발산 ETc 3일 합"] == pytest.approx(ev["outlook"]["cum3"][0])
+    assert next(x for k, x in v.items() if k.startswith("조회일(")) == pytest.approx(ev["outlook"]["start"])

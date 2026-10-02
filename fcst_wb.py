@@ -32,6 +32,8 @@ from obs_daily import kc_series
 MAIN_DAYS = 3                   # 서비스 주 지표: 처음 3개 대상일 (#18)
 ERR_MIN_N = 15                  # 오차표: 월 칸 표본이 이보다 적으면 전체 월 값을 씀
 ERR_DEFAULT_REL = 0.25          # 오차표에 해당 칸이 없을 때의 상대 오차(보수적 기본값)
+WET_CAUTION_RATIO = 0.10        # 과습 주의 기준: 관측 물수지 끝 Dr ≤ RAW × 이 비율 (서비스 엑셀 설정 시트에서 바꿈, 참고 지표)
+WET_ZERO_MM = 0.05               # 과습 경고: 끝 Dr이 0 (표시 자리 0.1 mm에서 0, 부동소수 오차 포함)
 PATHS = {                       # 예보 물수지 경로 (열 이름 Dr_<키>)
     "center": "중심: 기대 강수(강수량 × 강수확률)",
     "early": "빠르면: 비 없음 + ETc 오차만큼 많게",
@@ -673,6 +675,33 @@ def service_outlook(ft, owb, soil, err, run_name, run, etc_col="ETc_main", obs_l
                 advice=advice, run_name=run_name, run=pd.Timestamp(run))
 
 
+def soil_status(dr, raw, kc=None, observed=True, wet_caution=None):
+    """토양 상태 문자열(서비스 엑셀 '관수 전망'의 상태 칸과 같은 규칙).
+       과습은 관측 물수지 결과(observed)이고 생육기(Kc > 0)일 때만: 과습 경고 = 끝 Dr 0, 과습 주의 = 끝 Dr ≤ wet_caution(기본 RAW × 10%).
+       그 밖은 관수 쪽: 관수 필요(Dr ≥ RAW) / 주의(Dr ≥ RAW ÷ 2) / 안전. 예보로 진행한 날은 과습을 판정하지 않는다(THEORY 9장 ◆ 과습 표시)"""
+    if dr is None or pd.isna(dr):
+        return "자료 없음"
+    wc = raw * WET_CAUTION_RATIO if wet_caution is None else wet_caution
+    if observed and kc is not None and not pd.isna(kc) and kc > 0:
+        if dr < WET_ZERO_MM:
+            return "과습 경고"
+        if dr <= wc:
+            return "과습 주의"
+    return "관수 필요" if dr >= raw else ("주의" if dr >= 0.5 * raw else "안전")
+
+
+def wet_info(owb, day, raw, wet_caution=None, days=7):
+    """관측 물수지의 day(끝) 기준 과습 정보: dict(date, dr, status, dp, dp7 = 최근 days일 심층침투 합, zero_days = 그중 끝 Dr 0인 날 수)"""
+    o = owb.set_index("date")
+    day = pd.Timestamp(day)
+    if day not in o.index:
+        return None
+    w = o.loc[day - pd.Timedelta(days=days - 1):day]
+    return dict(date=day, dr=float(o.loc[day, "Dr"]), dp=float(o.loc[day, "DP"]), dp7=float(w.DP.sum()),
+                zero_days=int((w.Dr < WET_ZERO_MM).sum()),
+                status=soil_status(float(o.loc[day, "Dr"]), raw, o.loc[day, "Kc"], True, wet_caution))
+
+
 def last_observed(owb, before):
     """관측 물수지에서 관측 ETo가 있는 마지막 날(before 전). 없으면 None"""
     m = owb[(owb.ETo_src == "관측") & (pd.to_datetime(owb.date) < pd.Timestamp(before))]
@@ -733,7 +762,8 @@ def service_from(p, stn, run=None, err_path="fcst_error_table.csv", irrig=None, 
     obs_last = last if (last is not None and last < D - pd.Timedelta(days=1)) else None
     ol = service_outlook(ft, owb, soil, err, rn, run, obs_last=obs_last)
     name, grid_std = STATIONS.get(str(stn), ("", ""))
-    return dict(outlook=ol, owb=owb, soil=soil, err=err, err_path=err_path, meta=p["meta"], stn=str(stn), stn_name=name,
+    wet = wet_info(owb, ol["prev"], soil["raw"])            # 과습: 관측 마지막 날 끝 기준(예보는 쓰지 않음)
+    return dict(outlook=ol, owb=owb, soil=soil, err=err, err_path=err_path, meta=p["meta"], stn=str(stn), stn_name=name, wet=wet,
                 grid="-".join(p["check"].get("location") or []) or grid_std, main=main_method(ft), irrig=irrig or {}, ft=ft,
                 recent=recent_bias(ft, run, recent_days), recent_days=recent_days,
                 obs_last=p["obs"].date.max(), check=p["check"])
