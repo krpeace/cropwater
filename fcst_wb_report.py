@@ -720,15 +720,16 @@ def _service_main(ws, sv, W, fr, tl):
     T(ws, r, 5, "기대 강수 = 시각별 예보 강수량 × 강수확률. 예보 강수량은 관측보다 많게 나오는 경향이 있음(두 해 검증, 처음 이틀 1.1~2.1배)",
       size=9, color="555555")
     r += 1
-    H(ws, r, 1, "관수 필요 예상일 (관수하지 않으면)", LIGHT, white=False)
+    past = f'IF({ok3},FALSE,{ix("obs", "p3")}=1)'          # 3일이 모두 관측 물수지(지난 날짜)
+    H(ws, r, 1, f'=IF({past},"관수 필요였던 날 (실제 기록)","관수 필요 예상일 (관수하지 않으면)")', LIGHT, white=False)
     C(ws, r, 2, _need_text(W, tl, "c"), None, bold=True, size=13, fill=NEED_FILL)
     ws.merge_cells(start_row=r, start_column=2, end_row=r, end_column=3)
     r += 1
-    H(ws, r, 1, "  빠르면 (비가 오지 않으면)", LIGHT, white=False)
-    C(ws, r, 2, _need_text(W, tl, "e"), None); ws.merge_cells(start_row=r, start_column=2, end_row=r, end_column=3)
+    H(ws, r, 1, f'=IF({past},"","  빠르면 (비가 오지 않으면)")', LIGHT, white=False)
+    C(ws, r, 2, f'=IF({past},"",' + _need_text(W, tl, "e")[1:] + ")", None); ws.merge_cells(start_row=r, start_column=2, end_row=r, end_column=3)
     r += 1
-    H(ws, r, 1, "  늦으면 (예보 비가 모두 오면)", LIGHT, white=False)
-    C(ws, r, 2, _need_text(W, tl, "l"), None); ws.merge_cells(start_row=r, start_column=2, end_row=r, end_column=3)
+    H(ws, r, 1, f'=IF({past},"","  늦으면 (예보 비가 모두 오면)")', LIGHT, white=False)
+    C(ws, r, 2, f'=IF({past},"",' + _need_text(W, tl, "l")[1:] + ")", None); ws.merge_cells(start_row=r, start_column=2, end_row=r, end_column=3)
     r += 1
     H(ws, r, 1, "권장 관수량 (예상일에 포장용수량까지)", LIGHT, white=False)
     # 예상일의 중심 Dr: 출발이 이미 필요면 출발 값, 아니면 주 지표 기간에 처음 Dr ≥ RAW인 날의 값
