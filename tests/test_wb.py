@@ -230,8 +230,9 @@ def test_excel_wb_formula_matches_wb_step(prev, p, etc):
 def test_soil_status_wet_and_dry():
     s = W.soil_status
     assert s(0.0, 60, kc=1.0) == "과습 경고" and s(8.9e-16, 60, kc=1.0) == "과습 경고"       # 끝 Dr 0 (부동소수 오차 포함)
-    assert s(0.3, 60, kc=1.0) == "과습 주의" and s(6.0, 60, kc=1.0) == "과습 주의"           # ≤ RAW × 10%
-    assert s(6.1, 60, kc=1.0) == "안전" and s(30.0, 60, kc=1.0) == "주의" and s(60.0, 60, kc=1.0) == "관수 필요"
+    assert s(0.3, 60, kc=1.0) == "과습 주의" and s(29.9, 60, kc=1.0) == "과습 주의"          # < RAW ÷ 2 (포장용수량과 RAW의 중간)
+    assert s(30.0, 60, kc=1.0) == "주의" and s(60.0, 60, kc=1.0) == "관수 필요"
+    assert s(6.1, 60, kc=1.0, wet_caution=6.0) == "안전" and s(6.0, 60, kc=1.0, wet_caution=6.0) == "안전"   # 기준을 낮추면 '안전'이 다시 나옴
     assert s(0.0, 60, kc=0.0) == "안전" and s(0.0, 60, kc=None) == "안전"                    # 휴면기(Kc 0)는 과습 판정 안 함
     assert s(0.0, 60, kc=1.0, observed=False) == "안전"                                     # 예보로 진행한 날은 판정 안 함
     assert s(10.0, 60, kc=1.0, wet_caution=12.0) == "과습 주의" and s(np.nan, 60, kc=1.0) == "자료 없음"
@@ -336,7 +337,7 @@ def test_service_workbook_selected_date_matches_python(tmp_path):
         assert etc3 == (pytest.approx(sum(etc[t] for t in win)) if all(t in etc for t in win) else "자료 없음")
     v, _ = _recalc(out, None, tmp_path, "d")                               # 발표일: 기존 전망과 같은 값
     assert key(v, "전날(") == pytest.approx(ol["dr_obs_prev"]) and v["작물 증발산 ETc 3일 합"] == pytest.approx(ol["cum3"][0])
-    assert v["상태"] == sv["wet"]["status"] == "안전"                        # 6/6 비 뒤 3일: Dr 15
+    assert v["상태"] == sv["wet"]["status"] == "과습 주의"                   # 6/6 비 뒤 3일: Dr 15 < 30
     assert _recalc(out, "2026-06-07", tmp_path, "w")[0]["상태"] == "과습 경고"
     assert _recalc(out, "2026-06-08", tmp_path, "c")[0]["상태"] == "과습 주의"
 
