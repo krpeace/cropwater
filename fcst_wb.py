@@ -32,7 +32,7 @@ from obs_daily import kc_series
 MAIN_DAYS = 3                   # 서비스 주 지표: 처음 3개 대상일 (#18)
 ERR_MIN_N = 15                  # 오차표: 월 칸 표본이 이보다 적으면 전체 월 값을 씀
 ERR_DEFAULT_REL = 0.25          # 오차표에 해당 칸이 없을 때의 상대 오차(보수적 기본값)
-WET_CAUTION_RATIO = 0.5         # 과습 주의 기준: 관측 물수지 끝 Dr < RAW × 이 비율 = 포장용수량(Dr 0)과 RAW의 중간 (설정 시트에서 바꿈, 참고 지표)
+WET_CAUTION_RATIO = 0.5         # 토양 수분 충분 기준: 관측 물수지 끝 Dr < RAW × 이 비율 = 포장용수량(Dr 0)과 RAW의 중간 (설정 시트에서 바꿈, 참고 지표)
 WET_ZERO_MM = 0.05               # 과습 경고: 끝 Dr이 0 (표시 자리 0.1 mm에서 0, 부동소수 오차 포함)
 PATHS = {                       # 예보 물수지 경로 (열 이름 Dr_<키>)
     "center": "중심: 기대 강수(강수량 × 강수확률)",
@@ -677,8 +677,8 @@ def service_outlook(ft, owb, soil, err, run_name, run, etc_col="ETc_main", obs_l
 
 def soil_status(dr, raw, kc=None, observed=True, wet_caution=None):
     """토양 상태 문자열(서비스 엑셀 '관수 전망'의 상태 칸과 같은 규칙).
-       과습은 관측 물수지 결과(observed)이고 생육기(Kc > 0)일 때만: 과습 경고 = 끝 Dr 0, 과습 주의 = 끝 Dr < wet_caution(기본 RAW ÷ 2 = 포장용수량과 RAW의 중간).
-       기본값에서는 생육기 관측 상태가 과습 경고 / 과습 주의 / 주의 / 관수 필요 넷으로 나뉜다('안전'은 과습 주의 기준을 낮췄을 때만).
+       과습은 관측 물수지 결과(observed)이고 생육기(Kc > 0)일 때만: 과습 경고 = 끝 Dr 0, 토양 수분 충분 = 끝 Dr < wet_caution(기본 RAW ÷ 2 = 포장용수량과 RAW의 중간).
+       기본값에서는 생육기 관측 상태가 과습 경고 / 토양 수분 충분 / 주의 / 관수 필요 넷으로 나뉜다('안전'은 토양 수분 충분 기준을 낮췄을 때만).
        그 밖은 관수 쪽: 관수 필요(Dr ≥ RAW) / 주의(Dr ≥ RAW ÷ 2) / 안전. 예보로 진행한 날은 과습을 판정하지 않는다(THEORY 9장 ◆ 과습 표시)"""
     if dr is None or pd.isna(dr):
         return "자료 없음"
@@ -687,7 +687,7 @@ def soil_status(dr, raw, kc=None, observed=True, wet_caution=None):
         if dr < WET_ZERO_MM:
             return "과습 경고"
         if dr < wc:
-            return "과습 주의"
+            return "토양 수분 충분"
     return "관수 필요" if dr >= raw else ("주의" if dr >= 0.5 * raw else "안전")
 
 
