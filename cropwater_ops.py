@@ -397,7 +397,7 @@ def probe_asos(cfg, http=K.http_get, clock=None, key=None, store=None):
     clock = clock or K.Clock()
     store = store or K.Store(cfg["data"])
     col_ = Collector(cfg, store, http, clock, key)
-    now = clock.now()
+    now = pd.Timestamp(clock.now())                      # 실제 시계(K.Clock)는 datetime을 줌 → Timestamp로
     prev = now.normalize() - pd.Timedelta(days=1)
     res = K.fetch_asos_days(col_.key, cfg["stn"], prev, prev, http)
     items = [it for it in res["items"] if str(it.get("tm", ""))[:10] == f"{prev:%Y-%m-%d}"]

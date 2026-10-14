@@ -359,3 +359,20 @@ def test_late_rerun_is_late_collection(tmp_path):
     assert slot_result(r, dict(ok=True, backup=True, rs_method="S4")) == "백업: 직전 발표"
     r3 = c.collect_service("아침", TS("2026-06-10 02:00"))                # 또 실행 → 이미 받음
     assert r3["rerun"] and slot_result(r3, dict(ok=True, backup=False, rs_method="S4")) == "다시 만듦"
+
+
+def test_probe_asos_accepts_plain_datetime_clock(tmp_path):
+    """실제 시계(K.Clock)는 datetime을 돌려준다. probe-asos가 .normalize()에서 죽던 오류(H3 중간 점검) 재발 방지"""
+    from cropwater_ops import probe_asos
+    from ops_replay import MockApi, SimClock
+
+    class PlainClock(SimClock):
+        def now(self):
+            return super().now().to_pydatetime()
+
+    clock = PlainClock(TS("2026-10-15 10:40"))
+    api = MockApi({}, {}, clock, None)
+    cfg = dict(stn="101", grid="73_134", data=str(tmp_path), obs=None)
+    assert probe_asos(cfg, http=api, clock=clock, key="K") in (True, False)       # 예외 없이 끝남
+    log = K.Store(str(tmp_path)).read_log("collect_log.csv")
+    assert (log.kind == "asos_probe").sum() == 1
