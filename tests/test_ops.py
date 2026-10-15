@@ -232,7 +232,7 @@ def test_collect_delay_retry_on_time(tmp_path):
 def test_collect_missing_goes_to_backup(tmp_path):
     c, api, clock = _collector(tmp_path, _items(ISS), {"missing": ["2026-06-10 02:00"]})
     r = c.collect_service("아침", TS("2026-06-10 02:00"))
-    assert not r["complete8"] and r["attempts"] == 6 and clock.now() <= TS("2026-06-10 02:41")
+    assert not r["complete8"] and r["attempts"] == 9 and clock.now() <= TS("2026-06-10 03:31")
     from cropwater_ops import light_service
     a = load_archive(c.store.fcst_files("73_134"))
     st = ops_service_table(a, start=TS("2026-06-10"), end=TS("2026-06-10 02:00"))
@@ -257,7 +257,7 @@ def test_collect_fatal_stops(tmp_path):
 def test_collect_optional_missing_is_partial(tmp_path):
     c, api, clock = _collector(tmp_path, _items(ISS), {"drop_opt": ["2026-06-10 02:00"]})
     r = c.collect_service("아침", TS("2026-06-10 02:00"))
-    assert r["required_ok"] and not r["complete8"] and r["attempts"] == 6     # 마감까지 8요소를 기다린 뒤 S3
+    assert r["required_ok"] and not r["complete8"] and r["attempts"] == 9     # 마감까지 8요소를 기다린 뒤 S3
     assert c.store.has_issue("73_134", TS("2026-06-10 02:00"))
 
 
@@ -349,10 +349,10 @@ def test_service_outlook_obs_lag_matches_range_path():
 
 def test_late_rerun_is_late_collection(tmp_path):
     from cropwater_ops import slot_result
-    c, api, clock = _collector(tmp_path, _items(ISS), {"delay_min": {"2026-06-10 02:00": 45}})
+    c, api, clock = _collector(tmp_path, _items(ISS), {"delay_min": {"2026-06-10 02:00": 110}})
     r = c.collect_service("아침", TS("2026-06-10 02:00"))
-    assert not r["required_ok"] and r["attempts"] == 6                   # 02:55에야 제공 → 마감(02:40)까지 못 받음
-    clock.t = TS("2026-06-10 03:10")                                    # 다시 실행
+    assert not r["required_ok"] and r["attempts"] == 9                   # 03:50에야 제공 → 마감(03:30)까지 못 받음
+    clock.t = TS("2026-06-10 04:10")                                    # 다시 실행
     r2 = c.collect_service("아침", TS("2026-06-10 02:00"))
     assert r2["late"] and r2["attempts"] == 1 and r2["complete8"]
     assert slot_result(r2, dict(ok=True, backup=False, rs_method="S4")) == "지연 수집"

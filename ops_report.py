@@ -42,7 +42,7 @@ def build_h3_workbook(summ, tab, obs, collect_log, out, cfg=None):
 
     T(ws, 1, 1, f"H3 운영 수집 점검 — ASOS {(cfg or {}).get('stn', '')} · 격자 {(cfg or {}).get('grid', '')} · "
                 f"{summ['since']:%Y-%m-%d} ~ {summ['until']:%Y-%m-%d}", size=14, bold=True, color=GREEN)
-    T(ws, 2, 1, "정시 수집 성공 = 마감(발표 + 40분) 안에 서비스 발표(02·17시)를 8요소 완결로 받음. 실행 기록이 없는 슬롯은 '실행 안 됨'(실패)으로 셈",
+    T(ws, 2, 1, "정시 수집 성공 = 마감(발표 + 90분, 10/15 이전 슬롯은 40분) 안에 서비스 발표(02·17시)를 8요소 완결로 받음. 실행 기록이 없는 슬롯은 '실행 안 됨'(실패)으로 셈",
       size=9, color="555555")
     r = 4
     rows = [("예정 슬롯 (회)", f"=COUNTA(슬롯!A2:A{n})", "0", None),
