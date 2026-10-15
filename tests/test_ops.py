@@ -376,3 +376,19 @@ def test_probe_asos_accepts_plain_datetime_clock(tmp_path):
     assert probe_asos(cfg, http=api, clock=clock, key="K") in (True, False)       # 예외 없이 끝남
     log = K.Store(str(tmp_path)).read_log("collect_log.csv")
     assert (log.kind == "asos_probe").sum() == 1
+
+
+def test_fail_cause_splits_external_and_system():
+    """H3 중간 점검 합의: 실패를 외부(기상청 지연)·시스템·확인 필요로 나눔. 마감 뒤 수동 재수집 기록은 제외"""
+    from cropwater_ops import fail_cause
+    def rows(*sts, slot="2026-10-15 02:00", base="2026-10-15 02:"):
+        return pd.DataFrame([dict(logged_at=f"{base}{10 + 5 * i:02d}:00", slot=slot, kind="fcst", target=slot, status=s) for i, s in enumerate(sts)])
+    t = TS("2026-10-15 02:00")
+    assert fail_cause(t, True, "정시 성공", rows("ok")) == ""
+    assert fail_cause(t, False, "백업: 직전 발표", rows("nodata", "nodata", "nodata")) == "외부(기상청 지연)"
+    assert fail_cause(t, False, "백업: 직전 발표", rows("nodata", "retry", "nodata")) == "확인 필요"
+    assert fail_cause(t, False, "실패", rows("fatal")) == "시스템"
+    assert fail_cause(t, False, "실행 안 됨", pd.DataFrame()) == "시스템"
+    late = pd.concat([rows("nodata", "nodata"), pd.DataFrame([dict(logged_at="2026-10-15 08:40:00", slot="2026-10-15 02:00", kind="fcst",
+                                                                   target="2026-10-15 02:00", status="ok")])])
+    assert fail_cause(t, False, "백업: 직전 발표", late) == "외부(기상청 지연)"        # 08:40 수동 재수집(ok)은 마감 뒤라 제외
