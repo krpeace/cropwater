@@ -228,14 +228,17 @@ def test_excel_wb_formula_matches_wb_step(prev, p, etc):
 
 # ── 서비스 엑셀: 과습 상태·날짜 선택 ──────────────────────────────────────
 def test_soil_status_wet_and_dry():
+    """B안(2026-10-24): 휴면기 → 과습 경고(관측 날만) → 관수 필요 → 주의(≥ 여유 기준) → 여유. '안전'은 없음"""
     s = W.soil_status
     assert s(0.0, 60, kc=1.0) == "과습 경고" and s(8.9e-16, 60, kc=1.0) == "과습 경고"       # 끝 Dr 0 (부동소수 오차 포함)
-    assert s(0.3, 60, kc=1.0) == "토양 수분 충분" and s(29.9, 60, kc=1.0) == "토양 수분 충분"          # < RAW ÷ 2 (포장용수량과 RAW의 중간)
-    assert s(30.0, 60, kc=1.0) == "주의" and s(60.0, 60, kc=1.0) == "관수 필요"
-    assert s(6.1, 60, kc=1.0, wet_caution=6.0) == "안전" and s(6.0, 60, kc=1.0, wet_caution=6.0) == "안전"   # 기준을 낮추면 '안전'이 다시 나옴
-    assert s(0.0, 60, kc=0.0) == "휴면기" and s(70.0, 60, kc=0.0) == "휴면기" and s(0.0, 60, kc=None) == "안전"   # 휴면기(Kc 0)
-    assert s(0.0, 60, kc=1.0, observed=False) == "안전"                                     # 예보로 진행한 날은 판정 안 함
-    assert s(10.0, 60, kc=1.0, wet_caution=12.0) == "토양 수분 충분" and s(np.nan, 60, kc=1.0) == "자료 없음"
+    assert s(0.3, 60, kc=1.0) == "여유" and s(29.9, 60, kc=1.0) == "여유"                    # < RAW ÷ 2 (포장용수량과 RAW의 중간)
+    assert s(30.0, 60, kc=1.0) == "주의" and s(59.9, 60, kc=1.0) == "주의" and s(60.0, 60, kc=1.0) == "관수 필요"
+    assert s(0.0, 60, kc=1.0, observed=False) == "여유" and s(10.0, 60, kc=1.0, observed=False) == "여유"   # 예보 날: 과습 판정 안 함, 여유는 같은 기준
+    assert s(30.0, 60, kc=1.0, observed=False) == "주의" and s(61.0, 60, kc=1.0, observed=False) == "관수 필요"
+    assert s(6.0, 60, kc=1.0, wet_caution=6.0) == "주의" and s(5.9, 60, kc=1.0, wet_caution=6.0) == "여유"   # 여유 기준 = 주의 경계(빈 구간 없음)
+    assert s(0.0, 60, kc=0.0) == "휴면기" and s(70.0, 60, kc=0.0) == "휴면기" and s(0.0, 60, kc=None) == "여유"   # 휴면기(Kc 0), Kc 모르면 과습 판정 안 함
+    assert s(np.nan, 60, kc=1.0) == "자료 없음"
+    assert all(s(d, 60, kc=k, observed=o) != "안전" for d in np.arange(0, 121, 0.5) for k in (None, 1.0) for o in (True, False))
 
 
 def _service_sv(D, name, rain_day=None, lag=False, days=20):
@@ -266,7 +269,7 @@ def test_wet_info_uses_last_observed_day():
     o = sv["owb"].set_index("date")
     assert w["dp"] == pytest.approx(float(o.loc[TS("2026-06-09"), "DP"])) and w["dp"] > 100 and w["dp7"] == pytest.approx(w["dp"])
     sv2 = _service_sv("2026-06-10", "아침", rain_day="2026-06-08")                           # 하루 지남: Dr 5 ≤ 6
-    assert sv2["wet"]["status"] == "토양 수분 충분" and sv2["wet"]["dr"] == pytest.approx(5.0)
+    assert sv2["wet"]["status"] == "여유" and sv2["wet"]["dr"] == pytest.approx(5.0)
     sv3 = _service_sv("2026-06-10", "아침", rain_day="2026-06-08", lag=True)                 # 6/9 관측 없음 → 6/8(관측 마지막 날) 기준
     assert sv3["wet"]["date"] == TS("2026-06-08") and sv3["wet"]["status"] == "과습 경고"
 
@@ -284,8 +287,9 @@ def test_service_workbook_date_picker_layout(tmp_path):
     labels = [ws.cell(r, 1).value for r in range(1, 30)]
     assert labels.index("날짜 선택") < labels.index("지금 토양 상태 (조회일 전날 끝)")            # 날짜 선택이 토양 상태 위
     st = labels.index("상태") + 1
-    assert "과습 경고" in ws.cell(st, 2).value and "토양 수분 충분" in ws.cell(st, 2).value and "자료 없음" in ws.cell(st, 2).value
-    assert any(str(wb["설정"].cell(r, 1).value).startswith("토양 수분 충분 기준") for r in range(2, 14))
+    assert "과습 경고" in ws.cell(st, 2).value and "여유" in ws.cell(st, 2).value and "자료 없음" in ws.cell(st, 2).value
+    assert "안전" not in ws.cell(st, 2).value and "토양 수분 충분" not in ws.cell(st, 2).value
+    assert any(str(wb["설정"].cell(r, 1).value).startswith("여유 기준") for r in range(2, 14))
     tl = wb[TL]
     assert tl["P2"].value == 1 and tl.cell(tl.max_row, 16).value == 0 and tl["S3"].value == 1    # 관측 행 → 예보 행, 저녁 = +1
 
@@ -337,9 +341,9 @@ def test_service_workbook_selected_date_matches_python(tmp_path):
         assert etc3 == (pytest.approx(sum(etc[t] for t in win)) if all(t in etc for t in win) else "자료 없음")
     v, _ = _recalc(out, None, tmp_path, "d")                               # 발표일: 기존 전망과 같은 값
     assert key(v, "전날(") == pytest.approx(ol["dr_obs_prev"]) and v["작물 증발산 ETc 3일 합"] == pytest.approx(ol["cum3"][0])
-    assert v["상태"] == sv["wet"]["status"] == "토양 수분 충분"                   # 6/6 비 뒤 3일: Dr 15 < 30
+    assert v["상태"] == sv["wet"]["status"] == "여유"                             # 6/6 비 뒤 3일: Dr 15 < 30
     assert _recalc(out, "2026-06-07", tmp_path, "w")[0]["상태"] == "과습 경고"
-    assert _recalc(out, "2026-06-08", tmp_path, "c")[0]["상태"] == "토양 수분 충분"
+    assert _recalc(out, "2026-06-08", tmp_path, "c")[0]["상태"] == "여유"
 
 
 @pytest.mark.skipif(__import__("shutil").which("soffice") is None, reason="LibreOffice 없음")
