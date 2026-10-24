@@ -232,7 +232,7 @@ def test_collect_delay_retry_on_time(tmp_path):
 def test_collect_missing_goes_to_backup(tmp_path):
     c, api, clock = _collector(tmp_path, _items(ISS), {"missing": ["2026-06-10 02:00"]})
     r = c.collect_service("아침", TS("2026-06-10 02:00"))
-    assert not r["complete8"] and r["attempts"] == 6 and clock.now() <= TS("2026-06-10 02:41")
+    assert not r["complete8"] and r["attempts"] == 9 and clock.now() <= TS("2026-06-10 03:31")
     from cropwater_ops import light_service
     a = load_archive(c.store.fcst_files("73_134"))
     st = ops_service_table(a, start=TS("2026-06-10"), end=TS("2026-06-10 02:00"))
@@ -257,7 +257,7 @@ def test_collect_fatal_stops(tmp_path):
 def test_collect_optional_missing_is_partial(tmp_path):
     c, api, clock = _collector(tmp_path, _items(ISS), {"drop_opt": ["2026-06-10 02:00"]})
     r = c.collect_service("아침", TS("2026-06-10 02:00"))
-    assert r["required_ok"] and not r["complete8"] and r["attempts"] == 6     # 마감까지 8요소를 기다린 뒤 S3
+    assert r["required_ok"] and not r["complete8"] and r["attempts"] == 9     # 마감까지 8요소를 기다린 뒤 S3
     assert c.store.has_issue("73_134", TS("2026-06-10 02:00"))
 
 
@@ -349,13 +349,46 @@ def test_service_outlook_obs_lag_matches_range_path():
 
 def test_late_rerun_is_late_collection(tmp_path):
     from cropwater_ops import slot_result
-    c, api, clock = _collector(tmp_path, _items(ISS), {"delay_min": {"2026-06-10 02:00": 45}})
+    c, api, clock = _collector(tmp_path, _items(ISS), {"delay_min": {"2026-06-10 02:00": 110}})
     r = c.collect_service("아침", TS("2026-06-10 02:00"))
-    assert not r["required_ok"] and r["attempts"] == 6                   # 02:55에야 제공 → 마감(02:40)까지 못 받음
-    clock.t = TS("2026-06-10 03:10")                                    # 다시 실행
+    assert not r["required_ok"] and r["attempts"] == 9                   # 03:50에야 제공 → 마감(03:30)까지 못 받음
+    clock.t = TS("2026-06-10 04:10")                                    # 다시 실행
     r2 = c.collect_service("아침", TS("2026-06-10 02:00"))
     assert r2["late"] and r2["attempts"] == 1 and r2["complete8"]
     assert slot_result(r2, dict(ok=True, backup=False, rs_method="S4")) == "지연 수집"
     assert slot_result(r, dict(ok=True, backup=True, rs_method="S4")) == "백업: 직전 발표"
     r3 = c.collect_service("아침", TS("2026-06-10 02:00"))                # 또 실행 → 이미 받음
     assert r3["rerun"] and slot_result(r3, dict(ok=True, backup=False, rs_method="S4")) == "다시 만듦"
+
+
+def test_probe_asos_accepts_plain_datetime_clock(tmp_path):
+    """실제 시계(K.Clock)는 datetime을 돌려준다. probe-asos가 .normalize()에서 죽던 오류(H3 중간 점검) 재발 방지"""
+    from cropwater_ops import probe_asos
+    from ops_replay import MockApi, SimClock
+
+    class PlainClock(SimClock):
+        def now(self):
+            return super().now().to_pydatetime()
+
+    clock = PlainClock(TS("2026-10-15 10:40"))
+    api = MockApi({}, {}, clock, None)
+    cfg = dict(stn="101", grid="73_134", data=str(tmp_path), obs=None)
+    assert probe_asos(cfg, http=api, clock=clock, key="K") in (True, False)       # 예외 없이 끝남
+    log = K.Store(str(tmp_path)).read_log("collect_log.csv")
+    assert (log.kind == "asos_probe").sum() == 1
+
+
+def test_fail_cause_splits_external_and_system():
+    """H3 중간 점검 합의: 실패를 외부(기상청 지연)·시스템·확인 필요로 나눔. 마감 뒤 수동 재수집 기록은 제외"""
+    from cropwater_ops import fail_cause
+    def rows(*sts, slot="2026-10-15 02:00", base="2026-10-15 02:"):
+        return pd.DataFrame([dict(logged_at=f"{base}{10 + 5 * i:02d}:00", slot=slot, kind="fcst", target=slot, status=s) for i, s in enumerate(sts)])
+    t = TS("2026-10-15 02:00")
+    assert fail_cause(t, True, "정시 성공", rows("ok")) == ""
+    assert fail_cause(t, False, "백업: 직전 발표", rows("nodata", "nodata", "nodata")) == "외부(기상청 지연)"
+    assert fail_cause(t, False, "백업: 직전 발표", rows("nodata", "retry", "nodata")) == "확인 필요"
+    assert fail_cause(t, False, "실패", rows("fatal")) == "시스템"
+    assert fail_cause(t, False, "실행 안 됨", pd.DataFrame()) == "시스템"
+    late = pd.concat([rows("nodata", "nodata"), pd.DataFrame([dict(logged_at="2026-10-15 08:40:00", slot="2026-10-15 02:00", kind="fcst",
+                                                                   target="2026-10-15 02:00", status="ok")])])
+    assert fail_cause(t, False, "백업: 직전 발표", late) == "외부(기상청 지연)"        # 08:40 수동 재수집(ok)은 마감 뒤라 제외

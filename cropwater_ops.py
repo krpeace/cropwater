@@ -11,7 +11,7 @@ cropwater_ops.py — 운영 수집기와 관수 전망 자동 생성 (02-Cycle 5
   python cropwater_ops.py grid 37.90262 127.73570                  # 농장 좌표 → 격자
 
 [한 슬롯에서 하는 일] (THEORY 9장 ◆ 운영 수집)
-  1) 서비스 발표(아침 02시·저녁 17시)를 발표 10분 뒤부터 받는다. 못 받으면 +5·+10·+15·+20·+30분에 다시(마감 = 발표 + 40분)
+  1) 서비스 발표(아침 02시·저녁 17시)를 발표 10분 뒤부터 받는다. 못 받으면 +5·+10·+15·+20·+30·+45·+60·+80분에 다시(마감 = 발표 + 90분)
   2) 첫 시도 뒤, 지난 24시간 안에 아직 받지 않은 발표를 한 번씩 받는다(02시 발표의 00~02시 채움, 백업)
   3) ASOS 전날 일자료를 조회하고(없으면 기록만) 빠진 최근 날을 채운다
   4) 운영 결측 규칙(#12)으로 서비스 표 → 관수 전망 엑셀(fcst_wb_report.build_service_workbook)
@@ -33,8 +33,8 @@ import kma_fcst as K
 
 SLOTS = {"아침": 2, "저녁": 17}
 AVAIL_MIN = 10                       # 발표 10분 뒤부터 제공(활용가이드)
-DEADLINE_MIN = 40                    # 마감 = 발표 + 40분 (02:40, 17:40)
-RETRY_MIN = (0, 5, 10, 15, 20, 30)   # 슬롯 시작(발표 + 10분)부터의 재시도 시각(분)
+DEADLINE_MIN = 90                    # 마감 = 발표 + 90분 (03:30, 18:30). 10/15 02시 발표가 40분 넘게 늦어 40 → 90으로 연장
+RETRY_MIN = (0, 5, 10, 15, 20, 30, 45, 60, 80)   # 슬롯 시작(발표 + 10분)부터의 재시도 시각(분)
 CATCHUP_H = 24                       # 함께 받는 지난 발표 범위(시간)
 BACKUP_MAX_H = 24                    # 직전 발표로 대신할 수 있는 범위(시간)
 OBS_BACKFILL_DAYS = 30               # 관측 캐시: 전날 외에 워크북 뒤 최근 며칠의 빠진 날을 채움
@@ -397,7 +397,7 @@ def probe_asos(cfg, http=K.http_get, clock=None, key=None, store=None):
     clock = clock or K.Clock()
     store = store or K.Store(cfg["data"])
     col_ = Collector(cfg, store, http, clock, key)
-    now = clock.now()
+    now = pd.Timestamp(clock.now())                      # 실제 시계(K.Clock)는 datetime을 줌 → Timestamp로
     prev = now.normalize() - pd.Timedelta(days=1)
     res = K.fetch_asos_days(col_.key, cfg["stn"], prev, prev, http)
     items = [it for it in res["items"] if str(it.get("tm", ""))[:10] == f"{prev:%Y-%m-%d}"]
@@ -411,6 +411,34 @@ def probe_asos(cfg, http=K.http_get, clock=None, key=None, store=None):
 
 
 # ── H3 보고서 ───────────────────────────────────────────────────────────
+CAUSE_EXT, CAUSE_SYS, CAUSE_CHK = "외부(기상청 지연)", "시스템", "확인 필요"
+
+
+def fail_cause(slot_run, on_time, first_result, collect_log):
+    """정시 실패의 원인 구분(중간 점검 합의, 2026-10-15): 정시 성공이면 ''.
+    - 외부(기상청 지연): 그 슬롯의 서비스 발표 요청이 전부 정상 응답이었으나 '자료 없음'(코드 03)으로 마감까지 이어짐
+    - 시스템: 실행 기록 없음(PC·스케줄러), 인증·요청 오류(멈춤), 요청 기록이 없는 경우
+    - 확인 필요: 시간 초과·서버 오류가 섞인 경우(기상청·네트워크 어느 쪽인지 로그만으로 모름)"""
+    if on_time:
+        return ""
+    if first_result == "실행 안 됨":
+        return CAUSE_SYS
+    if collect_log is None or not len(collect_log):
+        return CAUSE_CHK
+    t = pd.Timestamp(slot_run)
+    key = f"{t:%Y-%m-%d %H:%M}"
+    c = collect_log[(collect_log.kind == "fcst") & (collect_log.slot.astype(str) == key) & (collect_log.target.astype(str) == key)]
+    c = c[pd.to_datetime(c.logged_at) <= t + pd.Timedelta(minutes=DEADLINE_MIN + 1)]       # 마감 뒤 수동 재수집(지연 수집) 기록은 제외
+    if not len(c):
+        return CAUSE_SYS
+    st = set(c.status.astype(str))
+    if "fatal" in st:
+        return CAUSE_SYS
+    if st <= {"nodata"}:
+        return CAUSE_EXT
+    return CAUSE_CHK
+
+
 def h3_summary(slot_log, collect_log, since=None, until=None):
     """슬롯 로그 → H3 지표. 슬롯마다 첫 행(예정 시각의 실행)으로 정시 여부를 판단하고, 실행 기록이 없는 슬롯은 '실행 안 됨'(실패)"""
     s = slot_log.copy()
@@ -438,11 +466,13 @@ def h3_summary(slot_log, collect_log, since=None, until=None):
             rows.append(dict(slot_run=t, run_name={h: n for n, h in SLOTS.items()}[t.hour], first_result="실행 안 됨",
                              on_time=False, backup_excel=False, final_result="실행 안 됨"))
     tab = pd.DataFrame(rows)
+    tab["fail_cause"] = [fail_cause(r.slot_run, r.on_time, r.first_result, collect_log) for r in tab.itertuples()]
     n = len(tab)
     n_ok = int(tab.on_time.sum())
     fail = tab[~tab.on_time]
     summ = dict(n_expected=n, n_on_time=n_ok, rate=n_ok / n if n else np.nan, n_not_on_time=len(fail),
                 n_backup_auto=int(fail.backup_excel.sum()),
+                causes=fail.fail_cause.value_counts().to_dict(),
                 backup_rate=(float(fail.backup_excel.mean()) if len(fail) else np.nan),
                 pass_rate=(n_ok / n >= 0.99) if n else False,
                 pass_backup=(bool(fail.backup_excel.all()) if len(fail) else True),
