@@ -32,7 +32,7 @@ from obs_daily import kc_series
 MAIN_DAYS = 3                   # 서비스 주 지표: 처음 3개 대상일 (#18)
 ERR_MIN_N = 15                  # 오차표: 월 칸 표본이 이보다 적으면 전체 월 값을 씀
 ERR_DEFAULT_REL = 0.25          # 오차표에 해당 칸이 없을 때의 상대 오차(보수적 기본값)
-WET_CAUTION_RATIO = 0.5         # 여유 기준: 끝 Dr < RAW × 이 비율이면 '여유', 이상이면 '주의' = 포장용수량(Dr 0)과 RAW의 중간 (설정 시트에서 바꿈)
+WET_CAUTION_RATIO = 0.5         # 주의 기준: 끝 Dr < RAW × 이 비율이면 '보통', 이상이면 '주의' = 포장용수량(Dr 0)과 RAW의 중간 (설정 시트에서 바꿈)
 WET_ZERO_MM = 0.05               # 과습 경고: 끝 Dr이 0 (표시 자리 0.1 mm에서 0, 부동소수 오차 포함)
 PATHS = {                       # 예보 물수지 경로 (열 이름 Dr_<키>)
     "center": "중심: 기대 강수(강수량 × 강수확률)",
@@ -678,8 +678,8 @@ def service_outlook(ft, owb, soil, err, run_name, run, etc_col="ETc_main", obs_l
 def soil_status(dr, raw, kc=None, observed=True, wet_caution=None):
     """토양 상태 문자열(서비스 엑셀 '관수 전망'의 상태 칸과 같은 규칙, 2026-10-24 사용자 결정 B안).
        위에서부터 처음 맞는 것: 자료 없음 → 휴면기(Kc ≤ 0) → 과습 경고(관측 물수지 날·생육기이고 끝 Dr 0) →
-       관수 필요(Dr ≥ RAW) → 주의(Dr ≥ 여유 기준) → 여유(그 밖). 여유 기준 기본 = RAW ÷ 2(포장용수량과 RAW의 중간).
-       과습만 관측 물수지 날에 판정하고 예보로 진행한 날은 판정하지 않는다. 여유·주의·관수 필요는 관측·예보 날 모두 같은 기준(THEORY 9장 ◆ 과습 표시)"""
+       관수 필요(Dr ≥ RAW) → 주의(Dr ≥ 주의 기준) → 보통(그 밖). 주의 기준 기본 = RAW ÷ 2(포장용수량과 RAW의 중간).
+       과습만 관측 물수지 날에 판정하고 예보로 진행한 날은 판정하지 않는다. 보통·주의·관수 필요는 관측·예보 날 모두 같은 기준(THEORY 9장 ◆ 과습 표시)"""
     if dr is None or pd.isna(dr):
         return "자료 없음"
     wc = raw * WET_CAUTION_RATIO if wet_caution is None else wet_caution
@@ -687,7 +687,7 @@ def soil_status(dr, raw, kc=None, observed=True, wet_caution=None):
         return "휴면기"                                    # 생육기가 아님(Kc 0): ETc 0이라 Dr이 움직이지 않음 → 판정하지 않음
     if observed and kc is not None and not pd.isna(kc) and kc > 0 and dr < WET_ZERO_MM:
         return "과습 경고"
-    return "관수 필요" if dr >= raw else ("주의" if dr >= wc else "여유")
+    return "관수 필요" if dr >= raw else ("주의" if dr >= wc else "보통")
 
 
 def wet_info(owb, day, raw, wet_caution=None, days=7):

@@ -11,7 +11,7 @@ fcst_wb_report.py — 02-Cycle 4단계(G4) 엑셀: 예보 물수지 검증 엑�
 [서비스 엑셀] build_service_workbook(sv, out)
   시트: 관수 전망 / 예보 물수지 / 관측 물수지 / 날짜별 / 오차표 / 편향 점검 / 설정 / 방법
   - 관수 전망의 조회일(노란 칸)을 바꾸면 그 날짜의 토양 상태·앞으로 3일을 '날짜별' 시트에서 찾아온다(없는 날짜는 '자료 없음')
-  - 상태: 휴면기 / 과습 경고(관측 물수지 날만) / 관수 필요 / 주의 / 여유 (여유 기준 = 설정 시트, 기본 RAW ÷ 2)
+  - 상태: 휴면기 / 과습 경고(관측 물수지 날만) / 관수 필요 / 주의 / 보통 (주의 기준 = 설정 시트, 기본 RAW ÷ 2)
   - 관측 물수지의 관수량(노란 칸)을 적으면 어제 끝 Dr과 예보 물수지·관수 필요 예상일이 바로 바뀐다
 
 근거: docs/THEORY.md 6·9장, docs/VALIDATION.md G4, 해석: docs/RESULTS_GUIDE.md
@@ -32,7 +32,7 @@ from fcst_wb import MAIN_DAYS, NEED_CATS, PATHS, WET_CAUTION_RATIO
 
 GREY = "8A8F87"; REF_FILL = "F2F2F2"; NEED_FILL = "F4C7B8"; WARN_FILL = "FBEED2"; OK_FILL = "D8EAD3"
 F1 = "0.0"
-WETW_FILL = "9DC3E6"; WETC_FILL = "D8EAD3"      # 과습 경고·여유 바탕
+WETW_FILL = "9DC3E6"; WETC_FILL = "D8EAD3"      # 과습 경고·보통 바탕
 TL = "날짜별"                                   # 조회용 시트(관측 물수지 + 예보 물수지를 날짜순으로 이음)
 SEL = "'관수 전망'!$B$5"                        # 조회일 칸
 
@@ -472,8 +472,8 @@ def build_service_workbook(sv, out):
     wb.remove(wb.active)
     ws_main = wb.create_sheet("관수 전망")
     W = {"_irr_log": {pd.Timestamp(k): v for k, v in (sv.get("irrig") or {}).items()}}
-    extra = [("WETC", "여유 기준 Dr (mm)", f"=RAW*{WET_CAUTION_RATIO}", F1, True,
-              "끝 고갈량 Dr이 이 값보다 작으면 '여유', 이 값 이상 RAW 미만이면 '주의'(관측 물수지 날에 Dr = 0이면 '과습 경고'). 기본 = RAW × "
+    extra = [("WETC", "주의 기준 Dr (mm)", f"=RAW*{WET_CAUTION_RATIO}", F1, True,
+              "끝 고갈량 Dr이 이 값보다 작으면 '보통', 이 값 이상 RAW 미만이면 '주의'(관측 물수지 날에 Dr = 0이면 '과습 경고'). 기본 = RAW × "
               f"{WET_CAUTION_RATIO:g} — 포장용수량(Dr 0)과 RAW의 중간. 숫자로 바꿔 쓸 수 있음(참고 지표, 검증 전)")]
     _settings(wb, soil, extra, W, f"관수 전망 — ASOS {sv['stn']} {sv.get('stn_name', '')} · {ol['run']:%Y-%m-%d %H시} {ol['run_name']} 발표")
     ws_owb, owb_dates, owb_dr, owb_last = sheet_owb(wb, sv["owb"], W, name="관측 물수지",
@@ -604,7 +604,7 @@ def _sheet_service_wb(wb, sv, W, owb_last):
         C(ws, r, 12, _wb_formula(f"L{r - 1}", f"K{r}", f"F{r}", W, irr), F1, bold=not grey, color=clr, fill=fill)
         C(ws, r, 13, _wb_formula(f"M{r - 1}", early_p, f"F{r}*(1+H{r})", W, irr), F1, color=clr, fill=fill)
         C(ws, r, 14, _wb_formula(f"N{r - 1}", f"I{r}", f"F{r}*MAX(1-H{r},0)", W, irr), F1, color=clr, fill=fill)
-        C(ws, r, 15, f'=IF(L{r}>={W["RAW"]},"관수 필요",IF(L{r}>={W["WETC"]},"주의","여유"))', color=clr, fill=fill)
+        C(ws, r, 15, f'=IF(L{r}>={W["RAW"]},"관수 필요",IF(L{r}>={W["WETC"]},"주의","보통"))', color=clr, fill=fill)
         if z["kind"] == "주":
             info["main"].append(r)
         elif z["kind"] == "참고":
@@ -670,17 +670,17 @@ def _service_main(ws, sv, W, fr, tl):
     H(ws, r_raw, 1, "RAW (이만큼 빠지면 관수)", LIGHT, white=False); C(ws, r_raw, 2, f"={raw}", F1, bold=True)
     T(ws, r_raw, 3, "mm", size=9, color="555555")
     H(ws, r_pct, 1, "RAW 대비", LIGHT, white=False); C(ws, r_pct, 2, f'=IF(ISNUMBER(B{r_dr}),B{r_dr}/B{r_raw},"")', "0%", bold=True)
-    # 상태(B안, 2026-10-24): 휴면기 → 과습 경고(관측 물수지 마지막 날, 생육기, 끝 Dr 0) → 관수 필요 / 주의 / 여유(전날 끝 Dr, 여유 기준 = 설정)
+    # 상태(B안, 2026-10-24): 휴면기 → 과습 경고(관측 물수지 마지막 날, 생육기, 끝 Dr 0) → 관수 필요 / 주의 / 보통(전날 끝 Dr, 주의 기준 = 설정)
     wet_dr = ix("c", "pw")
     grow = f'{ix("kc", "pw")}>0'
-    dry = f'IF(B{r_dr}>=B{r_raw},"관수 필요",IF(B{r_dr}>={W["WETC"]},"주의","여유"))'
+    dry = f'IF(B{r_dr}>=B{r_raw},"관수 필요",IF(B{r_dr}>={W["WETC"]},"주의","보통"))'
     H(ws, r_st, 1, "상태", LIGHT, white=False)
     C(ws, r_st, 2, (f'=IF({cell["p0"]}="","자료 없음",IF({ix("kc", "p0")}<=0,"휴면기",IF({cell["pw"]}="",{dry},'
                     f'IF(AND({grow},ROUND({wet_dr},1)<=0),"과습 경고",{dry}))))'), None, bold=True, size=12)
     C(ws, r_st, 3, (f'=IF(B{r_st}="과습 경고","관측 물수지 "&TEXT({ix("date", "pw")},"m/d")&" 끝 Dr "&TEXT({wet_dr},"0.0")&" mm — 포장용수량까지 참. 관수를 미루세요",'
-                    f'IF(B{r_st}="여유","여유 기준 "&TEXT({W["WETC"]},"0.0")&" mm 미만 — 관수할 필요 없음",""))'),
+                    f'IF(B{r_st}="보통","주의 기준 "&TEXT({W["WETC"]},"0.0")&" mm 미만 — 관수할 필요 없음",""))'),
       left=True, size=9, color="1F4E79")
-    for txt, fill in (("과습 경고", WETW_FILL), ("여유", WETC_FILL), ("관수 필요", NEED_FILL), ("주의", WARN_FILL)):
+    for txt, fill in (("과습 경고", WETW_FILL), ("보통", WETC_FILL), ("관수 필요", NEED_FILL), ("주의", WARN_FILL)):
         ws.conditional_formatting.add(f"B{r_st}", FormulaRule(formula=[f'$B${r_st}="{txt}"'], fill=PatternFill("solid", bgColor=fill, fgColor=fill)))
     wd = ix("date", "pw")
     H(ws, r_dp, 1, "심층침투 DP 최근 7일 합 (관측 물수지)", LIGHT, white=False)
@@ -759,9 +759,9 @@ def _service_main(ws, sv, W, fr, tl):
         C(ws, r, 10, g("rain_exp"), F1, color=clr, fill=fill)
         C(ws, r, 11, g("c"), F1, color=clr, fill=fill, bold=not grey)
         C(ws, r, 12, f'=IF({cell[p]}="","",IF({ix("obs", p)}=1,"관측",TEXT({ix("l", p)},"0")&" ~ "&TEXT({ix("e", p)},"0")))', None, color=clr, fill=fill)
-        # 상태: 과습 경고는 관측 물수지 날(지난 날짜)만, 여유·주의·관수 필요는 관측·예보 날 모두
+        # 상태: 과습 경고는 관측 물수지 날(지난 날짜)만, 보통·주의·관수 필요는 관측·예보 날 모두
         C(ws, r, 13, (f'=IF({cell[p]}="","",IF({ix("kc", p)}<=0,"휴면기",IF(AND({ix("obs", p)}=1,{ix("kc", p)}>0,ROUND({ix("c", p)},1)<=0),"과습 경고",'
-                      f'IF({ix("c", p)}>={raw},"관수 필요",IF({ix("c", p)}>={W["WETC"]},"주의","여유")))))'), color=clr, fill=fill)
+                      f'IF({ix("c", p)}>={raw},"관수 필요",IF({ix("c", p)}>={W["WETC"]},"주의","보통")))))'), color=clr, fill=fill)
         r += 1
     r += 1
     if ops:
@@ -782,7 +782,7 @@ def _service_main(ws, sv, W, fr, tl):
     notes = ["읽는 법: 고갈량 Dr은 포장용수량에서 빠진 물(mm)입니다. Dr이 RAW에 닿으면 관수가 필요합니다. 예상 Dr은 '관수하지 않을 때'의 값입니다.",
              "날짜 선택: 조회일(노란 칸)을 바꾸면 그 날짜의 토양 상태와 그 뒤 3일을 보여 줍니다. 지난 날짜는 관측 물수지 결과(실제 비·관수 기록 반영), "
              "발표일 뒤는 이 발표의 예보입니다. 자료가 없는 날짜는 '자료 없음'으로 나옵니다. 발표일로 되돌리려면 발표일을 다시 고르세요.",
-             "상태: 끝 Dr이 RAW 이상이면 '관수 필요', 여유 기준(설정 시트, 기본 RAW의 절반 = 포장용수량과 RAW의 중간) 이상이면 '주의', 그보다 작으면 '여유'입니다. "
+             "상태: 끝 Dr이 RAW 이상이면 '관수 필요', 주의 기준(설정 시트, 기본 RAW의 절반 = 포장용수량과 RAW의 중간) 이상이면 '주의', 그보다 작으면 '보통'입니다. "
              "과습 경고(전날 끝 Dr 0 = 포장용수량까지 참)는 관측 물수지로만 판정하고 예보로 진행한 날은 판정하지 않습니다. 전날 관측이 아직 없으면 관측 마지막 날 기준입니다. "
              "생육기가 아닌 날(Kc = 0)은 '휴면기'로 표시합니다. 배수 상태는 계산에 없는 참고 지표입니다.",
              "3일 합(주 지표)이 하루 값보다 믿을 만합니다(FAO-56 권고: 추정 일사로 계산한 ETo는 여러 날 합계로 쓰기). 마지막 날은 참고로만 보세요.",
@@ -861,9 +861,9 @@ def _method_service(wb, sv):
            ("날짜 선택", "'관수 전망'의 조회일(노란 칸, 기본 = 발표일)을 바꾸면 '날짜별' 시트(관측 물수지 + 예보 물수지를 날짜순으로 이은 표)에서 "
                       "전날 끝 Dr과 그 뒤 3일을 찾아옵니다. 지난 날짜는 관측 물수지 결과이고 ± 오차·범위는 없습니다. 표에 없는 날짜는 '자료 없음'"),
            ("상태", "위에서부터 처음 맞는 것: 휴면기(Kc ≤ 0) → 과습 경고(관측 물수지 날·생육기, 끝 Dr 0 = 0.05 mm 미만 — 비·관수가 근권을 포장용수량까지 채움, "
-                  "넘친 물은 심층침투 DP. 예보로 진행한 날은 판정 안 함) → 관수 필요(Dr ≥ RAW) → 주의(Dr ≥ 여유 기준) → 여유. "
-                  "여유 기준 = 설정 시트(기본 RAW ÷ 2 = 포장용수량과 RAW의 중간). 과습은 전날 관측이 아직 없으면 관측 마지막 날 기준. "
-                  "FAO-56 물수지는 포장용수량보다 젖은 상태와 배수 속도를 다루지 않으므로 과습·여유는 참고 지표(THEORY 9장)"),
+                  "넘친 물은 심층침투 DP. 예보로 진행한 날은 판정 안 함) → 관수 필요(Dr ≥ RAW) → 주의(Dr ≥ 주의 기준) → 보통. "
+                  "주의 기준 = 설정 시트(기본 RAW ÷ 2 = 포장용수량과 RAW의 중간). 과습은 전날 관측이 아직 없으면 관측 마지막 날 기준. "
+                  "FAO-56 물수지는 포장용수량보다 젖은 상태와 배수 속도를 다루지 않으므로 과습·보통은 참고 지표(THEORY 9장)"),
            ("운영 규칙", "서비스 발표를 마감(발표 + 40분)까지 못 받으면 24시간 안의 직전 발표로 계산(그 발표 기준 선행일의 S4 계수·오차 r). "
                       "하늘상태·강수확률이 없으면 S3. 어제 ASOS 관측이 아직 없으면 어제를 어제 아침 발표 D+0 예보로 먼저 진행하고, "
                       "저녁 발표의 '그날'처럼 범위(빠르면·늦으면)에 그날의 불확실성을 담음(#12, VALIDATION G5)"),
