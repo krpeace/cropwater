@@ -929,6 +929,9 @@ def _main_wb(a):
     lab = lambda k: ("지금 필요" if k == 0 else (f"D+{int(ol['days'].lead_day.iloc[k - 1])} ({ol['days'].target.iloc[k - 1]:%m/%d})"
                                               + (" 참고" if k > W.MAIN_DAYS else "")) if k else "기간 안 없음")
     print(f"[발표] {ol['run_name']} {ol['run']:%Y-%m-%d %H시}, 관측 마지막 날 {sv['obs_last']:%Y-%m-%d}, 출발 Dr {ol['start']:.1f} mm (RAW {raw:.0f})")
+    wet = sv.get("wet")
+    if wet and wet["status"].startswith("과습"):
+        print(f"[{wet['status']}] 관측 물수지 {wet['date']:%m/%d} 끝 Dr {wet['dr']:.1f} mm, 최근 7일 심층침투 {wet['dp7']:.1f} mm (예보는 쓰지 않음)")
     print(f"[3일 ETc] {ol['cum3'][0]:.1f} ± {ol['cum3'][1]:.1f} mm, 관수 필요 예상일 {lab(ol['need']['center'])} "
           f"(빠르면 {lab(ol['need']['early'])}, 늦으면 {lab(ol['need']['late'])})")
     out = a.out or f"output/fcst_service({a.stn})_{ol['run']:%Y%m%d_%H}.xlsx"
