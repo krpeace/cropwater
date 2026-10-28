@@ -412,6 +412,7 @@ def probe_asos(cfg, http=K.http_get, clock=None, key=None, store=None):
 
 # ── H3 보고서 ───────────────────────────────────────────────────────────
 CAUSE_EXT, CAUSE_SYS, CAUSE_CHK = "외부(기상청 지연)", "시스템", "확인 필요"
+CAUSE_XLS = "엑셀 생성 실패(수집은 정시)"
 
 
 def fail_cause(slot_run, on_time, first_result, collect_log):
@@ -439,6 +440,25 @@ def fail_cause(slot_run, on_time, first_result, collect_log):
     return CAUSE_CHK
 
 
+def received_on_time(slot_run, deadline, collect_log):
+    """수집 로그만으로 본 정시 수신: 그 슬롯의 서비스 발표 요청이 마감 안에 전부 정상(ok)이고 8요소 완결이면 True.
+    수집 뒤 단계(전날 관측·엑셀)에서 멈춰 슬롯 로그의 정시 여부가 비어 있거나 행이 없는 슬롯을 가려낸다(2026-10-29 판정 규칙 B)."""
+    if collect_log is None or not len(collect_log):
+        return False
+    t = pd.Timestamp(slot_run)
+    key = f"{t:%Y-%m-%d %H:%M}"
+    dl = pd.Timestamp(deadline) if deadline is not None and str(deadline).strip() and not pd.isna(deadline) \
+        else t + pd.Timedelta(minutes=DEADLINE_MIN)
+    c = collect_log[(collect_log.kind == "fcst") & (collect_log.slot.astype(str) == key)]
+    c = c[pd.to_datetime(c.logged_at) <= dl]
+    if not len(c) or not (c.target.astype(str) == key).any():
+        return False
+    first_ok = c[(c.target.astype(str) == key) & (c.status.astype(str) == "ok")]
+    if not len(first_ok):
+        return False
+    return bool((c.status.astype(str) == "ok").all() and (c.complete8.astype(str).str.lower() == "true").any())
+
+
 def h3_summary(slot_log, collect_log, since=None, until=None):
     """슬롯 로그 → H3 지표. 슬롯마다 첫 행(예정 시각의 실행)으로 정시 여부를 판단하고, 실행 기록이 없는 슬롯은 '실행 안 됨'(실패)"""
     s = slot_log.copy()
@@ -459,18 +479,26 @@ def h3_summary(slot_log, collect_log, since=None, until=None):
         if t in first.index:
             f, l = first.loc[t], last.loc[t]
             ok = str(f.on_time).lower() == "true"
-            rows.append(dict(slot_run=t, run_name=f.run_name, first_result=f.result, on_time=ok,
-                             backup_excel=(not ok) and bool(str(f.excel).strip()) and f.result != "실패",
+            rcv = ok or (f.result in ("다시 만듦", "실패") and received_on_time(t, f.get("deadline"), collect_log))
+            rows.append(dict(slot_run=t, run_name=f.run_name, first_result=f.result, on_time=ok, collect_ok=rcv,
+                             backup_excel=(not rcv) and bool(str(f.excel).strip()) and f.result != "실패"
+                             and (pd.isna(pd.to_datetime(f.get("deadline"), errors="coerce"))
+                                  or pd.Timestamp(f.started_at) <= pd.to_datetime(f.get("deadline"))),   # 마감 뒤 수동 실행 엑셀은 '자동' 백업이 아님
                              final_result=l.result, **{k: f.get(k, "") for k in ("src_run", "rs_method", "obs_prev", "attempts", "error")}))
         else:
+            rcv = received_on_time(t, None, collect_log)
             rows.append(dict(slot_run=t, run_name={h: n for n, h in SLOTS.items()}[t.hour], first_result="실행 안 됨",
-                             on_time=False, backup_excel=False, final_result="실행 안 됨"))
+                             on_time=False, collect_ok=rcv, backup_excel=False, final_result="실행 안 됨"))
     tab = pd.DataFrame(rows)
-    tab["fail_cause"] = [fail_cause(r.slot_run, r.on_time, r.first_result, collect_log) for r in tab.itertuples()]
+    tab["fail_cause"] = [CAUSE_XLS if (r.collect_ok and not r.on_time) else fail_cause(r.slot_run, r.collect_ok, r.first_result, collect_log)
+                         for r in tab.itertuples()]
     n = len(tab)
-    n_ok = int(tab.on_time.sum())
-    fail = tab[~tab.on_time]
+    n_ok = int(tab.collect_ok.sum())                       # 판정 기준(B): 정시 수집 성공 = 마감 안에 발표를 받음
+    n_strict = int(tab.on_time.sum())                      # 참고: 엑셀 생성까지 정시(슬롯 로그의 정시 성공)
+    n_xls = int((tab.collect_ok & ~tab.on_time).sum())     # 수집은 정시였으나 엑셀을 만들지 못한 슬롯
+    fail = tab[~tab.collect_ok]
     summ = dict(n_expected=n, n_on_time=n_ok, rate=n_ok / n if n else np.nan, n_not_on_time=len(fail),
+                n_strict_on_time=n_strict, n_excel_fail=n_xls,
                 n_backup_auto=int(fail.backup_excel.sum()),
                 causes=fail.fail_cause.value_counts().to_dict(),
                 backup_rate=(float(fail.backup_excel.mean()) if len(fail) else np.nan),
@@ -539,7 +567,8 @@ def main(argv=None):
     if a.cmd == "report":
         summ, path = build_report(cfg, a.since, a.until, a.report_out)
         print(f"[H3] {summ['since']:%Y-%m-%d}~{summ['until']:%Y-%m-%d} 예정 {summ['n_expected']}회, 정시 성공 {summ['n_on_time']}회 "
-              f"({summ['rate']:.1%}), 백업 자동 전환 {summ['n_backup_auto']}/{summ['n_not_on_time']} → {summ['verdict']}")
+              f"({summ['rate']:.1%}), 백업 자동 전환 {summ['n_backup_auto']}/{summ['n_not_on_time']}, "
+              f"수집은 정시·엑셀 생성 실패 {summ['n_excel_fail']}회 → {summ['verdict']}")
         print(f"[완료] {path}")
         return 0
     if not cfg.get("obs"):

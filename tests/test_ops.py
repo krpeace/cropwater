@@ -392,3 +392,56 @@ def test_fail_cause_splits_external_and_system():
     late = pd.concat([rows("nodata", "nodata"), pd.DataFrame([dict(logged_at="2026-10-15 08:40:00", slot="2026-10-15 02:00", kind="fcst",
                                                                    target="2026-10-15 02:00", status="ok")])])
     assert fail_cause(t, False, "백업: 직전 발표", late) == "외부(기상청 지연)"        # 08:40 수동 재수집(ok)은 마감 뒤라 제외
+
+
+def test_h3_summary_counts_collected_but_excel_failed_slots():
+    """수집은 마감 안에 끝났으나 뒤 단계에서 멈춘 슬롯(슬롯 로그에 '다시 만듦'만 있거나 행이 없음)은 수집 성공으로 세고 엑셀 생성 실패로 따로 센다.
+    수집 기록도 없는 슬롯은 그대로 실패(시스템)"""
+    from cropwater_ops import h3_summary, CAUSE_XLS, CAUSE_SYS
+    cols = ["slot_run", "run_name", "started_at", "finished_at", "deadline", "service_received_at", "on_time", "result",
+            "src_run", "backup", "rs_method", "obs_prev", "obs_prev_fetched_at", "attempts", "excel", "error"]
+
+    def row(slot, started, on_time, result, dl):
+        return dict(zip(cols, [slot, "저녁", started, started, dl, "", on_time, result, slot, False, "S4", "관측", "", 1, "x.xlsx", ""]))
+    sl = pd.DataFrame([
+        row("2026-10-26 17:00", "2026-10-26 17:10:02", True, "정시 성공", "2026-10-26 18:30"),
+        row("2026-10-27 17:00", "2026-10-29 00:37:25", None, "다시 만듦", "2026-10-27 18:30"),   # 17:10에 수집은 끝, 엑셀은 나중에 수동
+        row("2026-10-28 17:00", "2026-10-29 00:37:30", None, "다시 만듦", "2026-10-28 18:30"),   # 수집 기록 없음(PC가 꺼져 있었음)
+    ])
+
+    def fc(slot, logged, status="ok"):
+        return dict(logged_at=logged, slot=slot, kind="fcst", target=slot, attempt=1, http=200, code="00", msg="NORMAL_SERVICE",
+                    n_items=1, total=1, status=status, required_ok=True, complete8=True, elapsed_s=1.0, note="")
+    cl = pd.DataFrame([fc("2026-10-27 17:00", "2026-10-27 17:10:04"), fc("2026-10-26 17:00", "2026-10-26 17:10:03")])
+    s, tab, _ = h3_summary(sl, cl)
+    assert s["n_expected"] == 6                                  # 10/26·27·28의 02·17시
+    t = tab.set_index("slot_run")
+    assert t.loc[pd.Timestamp("2026-10-27 17:00"), "collect_ok"] and not t.loc[pd.Timestamp("2026-10-27 17:00"), "on_time"]
+    assert t.loc[pd.Timestamp("2026-10-27 17:00"), "fail_cause"] == CAUSE_XLS
+    assert not t.loc[pd.Timestamp("2026-10-28 17:00"), "collect_ok"]
+    assert t.loc[pd.Timestamp("2026-10-28 17:00"), "fail_cause"] == CAUSE_SYS
+    assert s["n_excel_fail"] == 1 and s["n_strict_on_time"] == 1
+    assert CAUSE_XLS not in s["causes"]                         # 정시 실패(판정) 수에는 넣지 않는다
+
+
+def test_received_on_time_requires_deadline_and_all_ok():
+    from cropwater_ops import received_on_time
+    base = dict(slot="2026-10-27 17:00", kind="fcst", target="2026-10-27 17:00", status="ok", complete8=True)
+    ok = pd.DataFrame([dict(base, logged_at="2026-10-27 17:10:04")])
+    assert received_on_time("2026-10-27 17:00", "2026-10-27 18:30", ok)
+    late = pd.DataFrame([dict(base, logged_at="2026-10-27 19:10:04")])
+    assert not received_on_time("2026-10-27 17:00", "2026-10-27 18:30", late)           # 마감 뒤 수신
+    bad = pd.DataFrame([dict(base, logged_at="2026-10-27 17:10:04"), dict(base, logged_at="2026-10-27 17:10:05", status="nodata")])
+    assert not received_on_time("2026-10-27 17:00", "2026-10-27 18:30", bad)            # 요청 중 자료 없음이 섞임
+    assert not received_on_time("2026-10-27 17:00", "2026-10-27 18:30", pd.DataFrame())
+
+
+def test_h3_manual_late_run_is_not_automatic_backup():
+    """마감 뒤에 사람이 돌린 '지연 수집' 엑셀은 백업 자동 전환으로 세지 않는다(10/24 02시: PC가 main이어서 슬롯이 실행 안 됨)"""
+    from cropwater_ops import h3_summary
+    cols = ["slot_run", "run_name", "started_at", "finished_at", "deadline", "service_received_at", "on_time", "result",
+            "src_run", "backup", "rs_method", "obs_prev", "obs_prev_fetched_at", "attempts", "excel", "error"]
+    r = dict(zip(cols, ["2026-10-24 02:00", "아침", "2026-10-24 09:45:52", "2026-10-24 09:46:05", "2026-10-24 03:30",
+                        "2026-10-24 09:45:54", False, "지연 수집", "2026-10-24 02:00", False, "S4", "관측", "", 1, "x.xlsx", ""]))
+    s, tab, _ = h3_summary(pd.DataFrame([r]), pd.DataFrame())
+    assert s["n_not_on_time"] == 1 and s["n_backup_auto"] == 0

@@ -23,27 +23,29 @@ def build_h3_workbook(summ, tab, obs, collect_log, out, cfg=None):
     ws.title = "요약"
     # 슬롯 시트 (요약 수식이 참조)
     ss = wb.create_sheet("슬롯")
-    heads = ["발표 (슬롯)", "구분", "처음 결과", "정시 성공", "백업 엑셀 자동", "마지막 결과", "계산한 발표", "Rs 방법", "전날 관측", "시도", "오류", "실패 원인"]
+    heads = ["발표 (슬롯)", "구분", "처음 결과", "정시 성공", "백업 엑셀 자동", "마지막 결과", "계산한 발표", "Rs 방법", "전날 관측", "시도", "오류", "실패 원인", "엑셀 정시 생성"]
     for c, h in enumerate(heads, 1):
         H(ss, 1, c, h)
     for i, r in enumerate(tab.itertuples(index=False), 2):
         C(ss, i, 1, pd.Timestamp(r.slot_run).to_pydatetime(), DTM)
         C(ss, i, 2, r.run_name)
-        C(ss, i, 3, r.first_result, fill=(OKF if r.on_time else BADF))
-        C(ss, i, 4, "예" if r.on_time else "아니오")
-        C(ss, i, 5, "" if r.on_time else ("예" if r.backup_excel else "아니오"))
+        cok = bool(getattr(r, "collect_ok", r.on_time))
+        C(ss, i, 3, r.first_result, fill=(OKF if r.on_time else (BADF if not cok else "FFF2CC")))
+        C(ss, i, 4, "예" if cok else "아니오")                       # 정시 수집 성공(판정 기준): 마감 안에 발표를 받음
+        C(ss, i, 5, "" if cok else ("예" if r.backup_excel else "아니오"))
         C(ss, i, 6, r.final_result)
         for c, k in ((7, "src_run"), (8, "rs_method"), (9, "obs_prev"), (10, "attempts"), (11, "error")):
             v = getattr(r, k, "")
             C(ss, i, c, "" if pd.isna(v) else v)
         C(ss, i, 12, getattr(r, "fail_cause", "") or "")
+        C(ss, i, 13, "예" if r.on_time else "아니오")                 # 엑셀까지 정시: 슬롯 로그의 '정시 성공'(참고)
     n = len(tab) + 1
     ss.freeze_panes = "A2"
-    widths(ss, {"A": 17, "B": 6, "C": 18, "D": 9, "E": 12, "F": 18, "G": 17, "H": 8, "I": 12, "J": 6, "K": 50, "L": 18})
+    widths(ss, {"A": 17, "B": 6, "C": 18, "D": 9, "E": 12, "F": 18, "G": 17, "H": 8, "I": 12, "J": 6, "K": 50, "L": 26, "M": 12})
 
     T(ws, 1, 1, f"H3 운영 수집 점검 — ASOS {(cfg or {}).get('stn', '')} · 격자 {(cfg or {}).get('grid', '')} · "
                 f"{summ['since']:%Y-%m-%d} ~ {summ['until']:%Y-%m-%d}", size=14, bold=True, color=GREEN)
-    T(ws, 2, 1, "정시 수집 성공 = 마감(발표 + 90분, 10/15 이전 슬롯은 40분) 안에 서비스 발표(02·17시)를 8요소 완결로 받음. 실행 기록이 없는 슬롯은 '실행 안 됨'(실패)으로 셈",
+    T(ws, 2, 1, "정시 수집 성공 = 마감(발표 + 90분, 10/15 이전 슬롯은 40분) 안에 서비스 발표(02·17시)를 8요소 완결로 받음(수집 로그 기준). 실행 기록이 없고 수집 기록도 없는 슬롯은 '실행 안 됨'(실패)",
       size=9, color="555555")
     r = 4
     rows = [("예정 슬롯 (회)", f"=COUNTA(슬롯!A2:A{n})", "0", None),
@@ -62,17 +64,25 @@ def build_h3_workbook(summ, tab, obs, collect_log, out, cfg=None):
         C(ws, r, 2, v, f, bold=k.startswith("★"), fill=fill)
         r += 1
     r += 1
+    H(ws, r, 1, "서비스 엑셀 생성 (참고, 판정 기준 아님)", GREEN); H(ws, r, 2, "값"); r += 1
+    H(ws, r, 1, "  엑셀 생성까지 정시 성공 (회)", LIGHT, white=False); C(ws, r, 2, f"=COUNTIF(슬롯!M2:M{n},\"예\")", "0"); r += 1
+    H(ws, r, 1, "  수집은 정시였으나 엑셀 생성 실패 (회)", LIGHT, white=False)
+    C(ws, r, 2, f"=COUNTIFS(슬롯!D2:D{n},\"예\",슬롯!M2:M{n},\"아니오\")", "0")
+    T(ws, r, 3, "발표는 마감 안에 받았으나 뒤 단계(전날 관측·엑셀)에서 멈춰 엑셀이 늦게 만들어짐 — 서비스 지연으로 따로 보고", size=9, color="555555"); r += 1
+    H(ws, r, 1, "  엑셀 생성까지 정시 성공률", LIGHT, white=False); C(ws, r, 2, f"=IF(B{4}=0,\"\",B{r - 2}/B{4})", "0.0%"); r += 2
     H(ws, r, 1, "정시 실패 원인 (판정은 전체 실패 수, 원인은 근거 자료)", GREEN); H(ws, r, 2, "회"); r += 1
     for k, note in (("외부(기상청 지연)", "서비스 발표 요청이 정상 응답, 자료 없음(03)이 마감까지 이어짐"),
                     ("시스템", "실행 안 됨(PC·스케줄러), 인증·요청 오류"),
-                    ("확인 필요", "시간 초과·서버 오류가 섞여 원인을 로그만으로 알 수 없음")):
+                    ("확인 필요", "시간 초과·서버 오류가 섞여 원인을 로그만으로 알 수 없음"),
+                    ("엑셀 생성 실패(수집은 정시)", "수집 성공으로 세며 정시 실패 수에는 넣지 않음(위 '서비스 엑셀 생성' 참고)")):
         H(ws, r, 1, "  " + k, LIGHT, white=False); C(ws, r, 2, f"=COUNTIF(슬롯!L2:L{n},\"{k}\")", "0")
         T(ws, r, 3, note, size=9, color="555555")
         r += 1
     T(ws, r, 1, "합의한 판정 규칙(2026-10-15): 기준(성공률 0.99, 백업 100%, 표본 100회)은 바꾸지 않음. 11/20에 실패 2건 이상이고 전부 '외부'이면 "
                 "마감 90분 기준으로 10/15 이후 100슬롯(약 12/4)까지 연장해 재판정. '시스템' 실패가 있으면 연장 없이 원인 수정 뒤 별도 재시험.",
       size=9, color="555555")
-    T(ws, r + 1, 1, "마감은 10/15 02시 슬롯부터 발표+90분(이전 40분). 슬롯 로그의 deadline 열에 슬롯별 마감이 기록됨. 10/15 02시 슬롯은 실패로 셈(자료가 올라온 시각을 몰라 보수적으로).",
+    T(ws, r + 1, 1, "판정 기준(2026-10-29): 정시 성공률은 '수집'만 셈. 수집은 정시였으나 뒤 단계에서 엑셀을 못 만든 슬롯(예: 10/26~10/28 파이썬 패키지 누락)은 수집 성공으로 세고 '서비스 엑셀 생성' 항목에 따로 보고. 10/24 02시(PC 브랜치 전환) 실패에도 일정·기준은 바꾸지 않음(2026-10-24 결정). "
+                "마감은 10/15 02시 슬롯부터 발표+90분(이전 40분). 슬롯 로그의 deadline 열에 슬롯별 마감이 기록됨. 10/15 02시 슬롯은 실패로 셈(자료가 올라온 시각을 몰라 보수적으로).",
       size=9, color="555555")
     r += 3
     H(ws, r, 1, "처음 결과별 슬롯 수", GREEN); H(ws, r, 2, "회"); r += 1
