@@ -357,6 +357,21 @@ def light_service(cfg, store, name, issue):
                 obs_prev="관측" if prev in have else "예보로 채움", excel=None, error="")
 
 
+REQUIRED_PACKAGES = ("requests", "pandas", "numpy", "openpyxl")
+
+
+def missing_packages(packages=REQUIRED_PACKAGES):
+    """운영에 필요한 파이썬 패키지 중 없는 것(파이썬 재설치·업데이트로 사라질 수 있음 — 2026-10-26~28 openpyxl 누락 5슬롯)"""
+    import importlib
+    out = []
+    for m in packages:
+        try:
+            importlib.import_module(m)
+        except ImportError:
+            out.append(m)
+    return out
+
+
 def run_slot(cfg, name=None, issue=None, http=K.http_get, clock=None, key=None, write=True, store=None, build="full"):
     """한 슬롯 처리(수집 → 관측 → 서비스 엑셀 → 슬롯 로그). 반환 dict(슬롯 로그 행)
        build: 'full'(관수 전망 계산, write면 엑셀) / 'light'(모의 재생용: 출처·방법만 판단)"""
@@ -368,12 +383,21 @@ def run_slot(cfg, name=None, issue=None, http=K.http_get, clock=None, key=None, 
     started = clock.now()
     col_ = Collector(cfg, store, http, clock, key)
     col = col_.collect_service(name, issue)
-    obs_info = col_.update_obs(issue, issue.normalize()) if not col_.fatal else dict(prev_ok=False, prev_fetched_at=None)
+    stage_err = ""
+    miss = missing_packages()
+    if miss:
+        stage_err = f"의존 패키지 없음: {', '.join(miss)} → pip install -r requirements.txt"
+    try:                                                      # 전날 관측 처리에서 멈춰도 슬롯 로그는 남긴다(수집은 이미 끝남)
+        obs_info = col_.update_obs(issue, issue.normalize()) if not col_.fatal else dict(prev_ok=False, prev_fetched_at=None)
+    except Exception as e:
+        obs_info = dict(prev_ok=False, prev_fetched_at=None)
+        stage_err = stage_err or f"전날 관측 처리 오류 {type(e).__name__}: {e}"
     obs_info["made_at"] = clock.now()
     try:
         svc = build_service(cfg, store, name, issue, obs_info, write=write) if build == "full" else light_service(cfg, store, name, issue)
     except Exception as e:                                    # 계산 오류도 슬롯 실패로 남긴다
-        svc = dict(ok=False, error=f"{type(e).__name__}: {e}"[:200], src_run=None, backup=None, rs_method="", obs_prev="")
+        svc = dict(ok=False, error=(stage_err + " / " if stage_err else "") + f"{type(e).__name__}: {e}"[:200], src_run=None, backup=None,
+                   rs_method="", obs_prev="")
     _, deadline = slot_times(issue)
     on_time = bool(col["complete8"] and col["received_at"] is not None and pd.Timestamp(col["received_at"]) <= deadline
                    and not col.get("late"))
@@ -386,7 +410,7 @@ def run_slot(cfg, name=None, issue=None, http=K.http_get, clock=None, key=None, 
                src_run=f"{pd.Timestamp(svc['src_run']):%Y-%m-%d %H:%M}" if svc.get("src_run") is not None else "",
                backup=svc.get("backup"), rs_method=svc.get("rs_method", ""), obs_prev=svc.get("obs_prev", ""),
                obs_prev_fetched_at=f"{obs_info['prev_fetched_at']:%Y-%m-%d %H:%M:%S}" if obs_info.get("prev_fetched_at") is not None else "",
-               attempts=col["attempts"], excel=svc.get("excel") or "", error=(col_.fatal or svc.get("error") or "")[:200])
+               attempts=col["attempts"], excel=svc.get("excel") or "", error=(col_.fatal or svc.get("error") or stage_err or "")[:200])
     store.log("slot_log.csv", row, SLOT_COLS)
     row["_svc"] = svc
     return row
@@ -480,7 +504,8 @@ def h3_summary(slot_log, collect_log, since=None, until=None):
             f, l = first.loc[t], last.loc[t]
             ok = str(f.on_time).lower() == "true"
             rcv = ok or (f.result in ("다시 만듦", "실패") and received_on_time(t, f.get("deadline"), collect_log))
-            rows.append(dict(slot_run=t, run_name=f.run_name, first_result=f.result, on_time=ok, collect_ok=rcv,
+            strict = ok and f.result != "실패"                 # 수집은 정시여도 엑셀을 못 만든 슬롯(결과 '실패')은 엑셀 정시가 아님
+            rows.append(dict(slot_run=t, run_name=f.run_name, first_result=f.result, on_time=strict, collect_ok=rcv,
                              backup_excel=(not rcv) and bool(str(f.excel).strip()) and f.result != "실패"
                              and (pd.isna(pd.to_datetime(f.get("deadline"), errors="coerce"))
                                   or pd.Timestamp(f.started_at) <= pd.to_datetime(f.get("deadline"))),   # 마감 뒤 수동 실행 엑셀은 '자동' 백업이 아님
@@ -563,6 +588,10 @@ def main(argv=None):
     if a.cmd == "probe-asos":
         ok = probe_asos(cfg)
         print(f"[전날 관측] {'조회됨' if ok else '아직 없음'}")
+        miss = missing_packages()
+        if miss:                                              # 매시 점검에서 패키지 누락을 일찍 드러낸다(작업 스케줄러 결과 3)
+            print(f"[경고] 의존 패키지 없음: {', '.join(miss)} → PC에서 pip install -r requirements.txt")
+            return 3
         return 0
     if a.cmd == "report":
         summ, path = build_report(cfg, a.since, a.until, a.report_out)
