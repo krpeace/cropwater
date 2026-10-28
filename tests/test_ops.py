@@ -445,3 +445,31 @@ def test_h3_manual_late_run_is_not_automatic_backup():
                         "2026-10-24 09:45:54", False, "지연 수집", "2026-10-24 02:00", False, "S4", "관측", "", 1, "x.xlsx", ""]))
     s, tab, _ = h3_summary(pd.DataFrame([r]), pd.DataFrame())
     assert s["n_not_on_time"] == 1 and s["n_backup_auto"] == 0
+
+
+def test_run_slot_logs_row_when_post_collect_stage_crashes(tmp_path, monkeypatch):
+    """수집 뒤 단계(전날 관측·엑셀)가 죽어도 슬롯 로그 행을 남기고, 수집은 정시로 기록한다(10/26~10/28 openpyxl 누락 5슬롯: 행이 없어 알아채지 못함)"""
+    import cropwater_ops as O
+    c, api, clock = _collector(tmp_path, _items(ISS))
+
+    def boom(*a, **k):
+        raise ModuleNotFoundError("No module named 'openpyxl'")
+    monkeypatch.setattr(O.Collector, "update_obs", boom)
+    monkeypatch.setattr(O, "build_service", boom)
+    monkeypatch.setattr(O, "missing_packages", lambda *a, **k: ["openpyxl"])
+    cfg = dict(stn="101", grid="73_134", data=str(tmp_path), obs=None, out=str(tmp_path))
+    row = O.run_slot(cfg, "아침", TS("2026-06-10 02:00"), http=api, clock=clock, key="K", store=c.store, write=False)
+    assert row["on_time"] is True and row["result"] == "실패"
+    assert "openpyxl" in row["error"] and "pip install" in row["error"]
+    log = c.store.read_log("slot_log.csv")
+    assert len(log) == 1 and log.iloc[0].result == "실패"          # 행이 남는다
+    # 보고서: 수집은 정시, 엑셀은 실패로 따로 센다
+    s, tab, _ = O.h3_summary(log, c.store.read_log("collect_log.csv"), since="2026-06-10", until="2026-06-10")
+    t = tab.set_index("slot_run").iloc[0]
+    assert t.collect_ok and not t.on_time and s["n_excel_fail"] == 1
+
+
+def test_missing_packages_lists_absent_modules():
+    from cropwater_ops import missing_packages
+    assert missing_packages(("os", "no_such_pkg_zz")) == ["no_such_pkg_zz"]
+    assert missing_packages(("os", "sys")) == []
